@@ -23,8 +23,8 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositori
         openssl=3.5.1-r0 \
         graphicsmagick=1.3.45-r0 \
         tini=0.19.0-r3 \
-        tzdata=2025b-r0 \
-        ca-certificates=20241121-r2 \
+        tzdata \
+        ca-certificates \
         libc6-compat=1.1.0-r4 \
         jq=1.8.0-r0
 
