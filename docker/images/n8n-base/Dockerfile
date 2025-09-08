@@ -17,15 +17,15 @@ RUN \
 RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.22/main" >> /etc/apk/repositories && echo "https://dl-cdn.alpinelinux.org/alpine/v3.22/community" >> /etc/apk/repositories && \
     apk update && \
     apk add --no-cache \
-        git=2.50.1-r0 \
-        openssh=10.0_p1-r7 \
-        openssl=3.5.1-r0 \
-        graphicsmagick=1.3.45-r0 \
-        tini=0.19.0-r3 \
+        git \
+        openssh \
+        openssl \
+        graphicsmagick \
+        tini \
         tzdata \
         ca-certificates \
-        libc6-compat=1.1.0-r4 \
-        jq=1.8.0-r0
+        libc6-compat \
+        jq
 
 # Install full-icu
 RUN npm install -g full-icu@1.5.0
