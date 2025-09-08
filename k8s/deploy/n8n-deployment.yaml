@@ -58,10 +58,10 @@ spec:
             - name: N8N_PORT
               value: "5678"
             - name: WEBHOOK_URL
-              value: "http://192.168.68.120:30567"
+              value: "https://n8n.ozlevka.com"
             - name: NODE_FUNCTION_ALLOW_EXTERNAL
               value: "node-fetch"
-          image: ghcr.io/ozlevka/n8n:0.0.5
+          image: ghcr.io/ozlevka/n8n:0.0.6
           name: n8n
           ports:
             - containerPort: 5678
