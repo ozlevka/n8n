@@ -60,6 +60,7 @@ export interface FrontendSettings {
 	versionCli: string;
 	nodeJsVersion: string;
 	concurrency: number;
+	isNativePythonRunnerEnabled: boolean;
 	authCookie: {
 		secure: boolean;
 	};
@@ -153,6 +154,7 @@ export interface FrontendSettings {
 		workerView: boolean;
 		advancedPermissions: boolean;
 		apiKeyScopes: boolean;
+		workflowDiffs: boolean;
 		projects: {
 			team: {
 				limit: number;

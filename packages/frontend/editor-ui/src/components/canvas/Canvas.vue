@@ -4,7 +4,7 @@ import type { CanvasLayoutEvent, CanvasLayoutSource } from '@/composables/useCan
 import { useCanvasLayout } from '@/composables/useCanvasLayout';
 import { useCanvasNodeHover } from '@/composables/useCanvasNodeHover';
 import { useCanvasTraversal } from '@/composables/useCanvasTraversal';
-import type { ContextMenuAction, ContextMenuTarget } from '@/composables/useContextMenu';
+import type { ContextMenuTarget } from '@/composables/useContextMenu';
 import { useContextMenu } from '@/composables/useContextMenu';
 import { type KeyMap, useKeybindings } from '@/composables/useKeybindings';
 import type { PinDataSource } from '@/composables/usePinnedData';
@@ -56,6 +56,7 @@ import CanvasArrowHeadMarker from './elements/edges/CanvasArrowHeadMarker.vue';
 import Edge from './elements/edges/CanvasEdge.vue';
 import Node from './elements/nodes/CanvasNode.vue';
 import { useExperimentalNdvStore } from './experimental/experimentalNdv.store';
+import { type ContextMenuAction } from '@/composables/useContextMenuItems';
 
 const $style = useCssModule();
 
@@ -137,6 +138,9 @@ const props = withDefaults(
 );
 
 const { isMobileDevice, controlKeyCode } = useDeviceSupport();
+const experimentalNdvStore = useExperimentalNdvStore();
+
+const isExperimentalNdvActive = computed(() => experimentalNdvStore.isActive(viewport.value.zoom));
 
 const vueFlow = useVueFlow(props.id);
 const {
@@ -174,13 +178,9 @@ const {
 	getDownstreamNodes,
 	getUpstreamNodes,
 } = useCanvasTraversal(vueFlow);
-const { layout } = useCanvasLayout({ id: props.id });
-
-const experimentalNdvStore = useExperimentalNdvStore();
+const { layout } = useCanvasLayout(props.id, isExperimentalNdvActive);
 
 const isPaneReady = ref(false);
-
-const isExperimentalNdvActive = computed(() => experimentalNdvStore.isActive(viewport.value.zoom));
 
 const classes = computed(() => ({
 	[$style.canvas]: true,
@@ -196,15 +196,18 @@ const classes = computed(() => ({
 const panningKeyCode = ref<string[] | true>(isMobileDevice ? true : [' ', controlKeyCode]);
 const panningMouseButton = ref<number[] | true>(isMobileDevice ? true : [1]);
 const selectionKeyCode = ref<string | true | null>(isMobileDevice ? 'Shift' : true);
+const isInPanningMode = ref(false);
 
 function switchToPanningMode() {
 	selectionKeyCode.value = null;
 	panningMouseButton.value = [0, 1];
+	isInPanningMode.value = true;
 }
 
 function switchToSelectionMode() {
 	selectionKeyCode.value = true;
 	panningMouseButton.value = [1];
+	isInPanningMode.value = false;
 }
 
 onKeyDown(panningKeyCode.value, switchToPanningMode, {
@@ -463,10 +466,16 @@ function onUpdateNodeParameters(id: string, parameters: Record<string, unknown>)
 
 function onUpdateNodeInputs(id: string) {
 	emit('update:node:inputs', id);
+
+	// Let VueFlow update connection paths to match the new handle position
+	void nextTick(() => vueFlow.updateNodeInternals([id]));
 }
 
 function onUpdateNodeOutputs(id: string) {
 	emit('update:node:outputs', id);
+
+	// Let VueFlow update connection paths to match the new handle position
+	void nextTick(() => vueFlow.updateNodeInternals([id]));
 }
 
 function onFocusNode(id: string) {
@@ -651,8 +660,13 @@ function setReadonly(value: boolean) {
 	elementsSelectable.value = true;
 }
 
-function onPaneMoveStart() {
-	isPaneMoving.value = true;
+function onPaneMove({ event }: { event: unknown }) {
+	// The event object is either D3ZoomEvent or WheelEvent.
+	// Here I'm ignoring D3ZoomEvent because it's not necessarily followed by a moveEnd event.
+	// This can be simplified once https://github.com/bcakmakoglu/vue-flow/issues/1908 is resolved
+	if (isInPanningMode.value || event instanceof WheelEvent) {
+		isPaneMoving.value = true;
+	}
 }
 
 function onPaneMoveEnd() {
@@ -874,7 +888,6 @@ watch([vueFlow.nodes, () => experimentalNdvStore.nodeNameToBeFocused], ([nodes, 
 	// setTimeout() so that this happens after layout recalculation with the node to be focused
 	setTimeout(() => {
 		experimentalNdvStore.focusNode(toFocusNode, {
-			collapseOthers: false,
 			canvasViewport: viewport.value,
 			canvasDimensions: dimensions.value,
 			setCenter,
@@ -894,6 +907,11 @@ provide(CanvasKey, {
 	initialized,
 	viewport,
 	isExperimentalNdvActive,
+	isPaneMoving,
+});
+
+defineExpose({
+	executeContextMenuAction: onContextMenuAction,
 });
 </script>
 
@@ -911,7 +929,7 @@ provide(CanvasKey, {
 		snap-to-grid
 		:snap-grid="[GRID_SIZE, GRID_SIZE]"
 		:min-zoom="0"
-		:max-zoom="experimentalNdvStore.isEnabled ? experimentalNdvStore.maxCanvasZoom : 4"
+		:max-zoom="experimentalNdvStore.isZoomedViewEnabled ? experimentalNdvStore.maxCanvasZoom : 4"
 		:selection-key-code="selectionKeyCode"
 		:zoom-activation-key-code="panningKeyCode"
 		:pan-activation-key-code="panningKeyCode"
@@ -923,7 +941,7 @@ provide(CanvasKey, {
 		@connect-end="onConnectEnd"
 		@pane-click="onClickPane"
 		@pane-context-menu="onOpenContextMenu"
-		@move-start="onPaneMoveStart"
+		@move="onPaneMove"
 		@move-end="onPaneMoveEnd"
 		@node-drag-stop="onNodeDragStop"
 		@node-click="onNodeClick"

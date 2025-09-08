@@ -48,6 +48,10 @@ describe('tool-executor', () => {
 			workflowOperations: null,
 			messages,
 			workflowContext: {},
+			previousSummary: 'EMPTY',
+			planFeedback: null,
+			planStatus: null,
+			workflowPlan: null,
 		});
 
 		// Helper to create mock tool

@@ -13,10 +13,9 @@ RUN \
   apk del .build-deps-fonts && \
   find /usr/share/fonts/truetype/msttcorefonts/ -type l -exec unlink {} \;
 
-# Install essential OS dependencies with pinned versions
-RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositories && \
+# Install essential OS dependencies
+RUN echo "https://dl-cdn.alpinelinux.org/alpine/v3.22/main" >> /etc/apk/repositories && echo "https://dl-cdn.alpinelinux.org/alpine/v3.22/community" >> /etc/apk/repositories && \
     apk update && \
-    apk upgrade && \
     apk add --no-cache \
         git=2.50.1-r0 \
         openssh=10.0_p1-r7 \
@@ -28,9 +27,8 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/main" >> /etc/apk/repositori
         libc6-compat=1.1.0-r4 \
         jq=1.8.0-r0
 
-# Update npm, install full-icu and npm@11.4.2 to fix brace-expansion vulnerability
-# Remove npm update after vulnerability is fixed in in node image
-RUN npm install -g full-icu@1.5.0 npm@11.4.2
+# Install full-icu
+RUN npm install -g full-icu@1.5.0
 
 RUN rm -rf /tmp/* /root/.npm /root/.cache/node /opt/yarn* && \
   apk del apk-tools

@@ -9,13 +9,11 @@ import {
 	testDb,
 	mockInstance,
 } from '@n8n/backend-test-utils';
-import type { Project, ProjectRole, User } from '@n8n/db';
+import type { Project, User } from '@n8n/db';
 import { FolderRepository, ProjectRepository, WorkflowRepository } from '@n8n/db';
 import { Container } from '@n8n/di';
-import { DateTime } from 'luxon';
-import { ApplicationError, PROJECT_ROOT } from 'n8n-workflow';
-
-import { ActiveWorkflowManager } from '@/active-workflow-manager';
+import type { ProjectRole } from '@n8n/permissions';
+import { PROJECT_EDITOR_ROLE_SLUG, PROJECT_VIEWER_ROLE_SLUG } from '@n8n/permissions';
 import {
 	createCredentials,
 	getCredentialSharings,
@@ -25,10 +23,14 @@ import {
 } from '@test-integration/db/credentials';
 import { createFolder } from '@test-integration/db/folders';
 import { createTag } from '@test-integration/db/tags';
+import { DateTime } from 'luxon';
+import { ApplicationError, PROJECT_ROOT } from 'n8n-workflow';
 
 import { createOwner, createMember, createUser, createAdmin } from '../shared/db/users';
 import type { SuperAgentTest } from '../shared/types';
 import * as utils from '../shared/utils/';
+
+import { ActiveWorkflowManager } from '@/active-workflow-manager';
 
 let owner: User;
 let member: User;
@@ -1611,14 +1613,19 @@ describe('GET /projects/:projectId/folders', () => {
 	});
 
 	test('should select path field when requested', async () => {
-		const folder1 = await createFolder(ownerProject, { name: 'Test Folder' });
+		const folder1 = await createFolder(ownerProject, {
+			name: 'Test Folder',
+			updatedAt: DateTime.now().minus({ seconds: 2 }).toJSDate(),
+		});
 		const folder2 = await createFolder(ownerProject, {
 			name: 'Test Folder 2',
 			parentFolder: folder1,
+			updatedAt: DateTime.now().minus({ seconds: 1 }).toJSDate(),
 		});
 		const folder3 = await createFolder(ownerProject, {
 			name: 'Test Folder 3',
 			parentFolder: folder2,
+			updatedAt: DateTime.now().toJSDate(),
 		});
 
 		const response = await authOwnerAgent
@@ -1788,7 +1795,7 @@ describe('PUT /projects/:projectId/folders/:folderId/transfer', () => {
 	test('should not transfer folder if license does not allow it', async () => {
 		testServer.license.disable('feat:folders');
 
-		const admin = await createUser({ role: 'global:admin' });
+		const admin = await createUser({ role: { slug: 'global:admin' } });
 		const sourceProject = await createTeamProject('source project', admin);
 		const destinationProject = await createTeamProject('destination project', member);
 		const sourceFolder1 = await createFolder(sourceProject, { name: 'Source Folder 1' });
@@ -1858,7 +1865,7 @@ describe('PUT /projects/:projectId/folders/:folderId/transfer', () => {
 			.expect(404);
 	});
 
-	test.each<ProjectRole>(['project:editor', 'project:viewer'])(
+	test.each<ProjectRole>([PROJECT_EDITOR_ROLE_SLUG, PROJECT_VIEWER_ROLE_SLUG])(
 		'%ss cannot transfer workflows',
 		async (projectRole) => {
 			//
@@ -1991,7 +1998,7 @@ describe('PUT /projects/:projectId/folders/:folderId/transfer', () => {
 
 	test('owner transfers folder from project they are not part of, e.g. test global cred sharing scope', async () => {
 		// ARRANGE
-		const admin = await createUser({ role: 'global:admin' });
+		const admin = await createUser({ role: { slug: 'global:admin' } });
 		const sourceProject = await createTeamProject('source project', admin);
 		const destinationProject = await createTeamProject('destination project', member);
 		const sourceFolder1 = await createFolder(sourceProject, { name: 'Source Folder 1' });
@@ -2073,7 +2080,7 @@ describe('PUT /projects/:projectId/folders/:folderId/transfer', () => {
 
 	test('admin transfers folder from project they are not part of, e.g. test global cred sharing scope', async () => {
 		// ARRANGE
-		const admin = await createUser({ role: 'global:admin' });
+		const admin = await createUser({ role: { slug: 'global:admin' } });
 		const sourceProject = await createTeamProject('source project', owner);
 		const destinationProject = await createTeamProject('destination project', owner);
 		const sourceFolder1 = await createFolder(sourceProject, { name: 'Source Folder 1' });

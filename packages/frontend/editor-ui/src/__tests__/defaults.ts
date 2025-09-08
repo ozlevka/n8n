@@ -40,6 +40,7 @@ export const defaultSettings: FrontendSettings = {
 		workerView: false,
 		advancedPermissions: false,
 		apiKeyScopes: false,
+		workflowDiffs: false,
 		projects: {
 			team: {
 				limit: 1,
@@ -101,6 +102,7 @@ export const defaultSettings: FrontendSettings = {
 	versionCli: '',
 	nodeJsVersion: '',
 	concurrency: -1,
+	isNativePythonRunnerEnabled: false,
 	versionNotifications: {
 		enabled: true,
 		endpoint: '',

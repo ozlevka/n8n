@@ -9,7 +9,7 @@ import {
 	type ActionDropdownItem,
 } from '@n8n/design-system';
 import type { TableHeader, TableOptions } from '@n8n/design-system/components/N8nDataTableServer';
-import type { IUser } from '@/Interface';
+import type { IUser } from '@n8n/rest-api-client/api/users';
 import SettingsUsersRoleCell from '@/components/SettingsUsers/SettingsUsersRoleCell.vue';
 import SettingsUsersProjectsCell from '@/components/SettingsUsers/SettingsUsersProjectsCell.vue';
 import SettingsUsersActionsCell from '@/components/SettingsUsers/SettingsUsersActionsCell.vue';
@@ -109,7 +109,7 @@ const roles = computed<Record<Role, { label: string; desc: string }>>(() => ({
 	},
 	[ROLE.Default]: { label: i18n.baseText('auth.roles.default'), desc: '' },
 }));
-const roleActions = computed<ActionDropdownItem[]>(() => [
+const roleActions = computed<Array<ActionDropdownItem<Role | 'delete'>>>(() => [
 	{
 		id: ROLE.Member,
 		label: i18n.baseText('auth.roles.member'),
@@ -188,5 +188,3 @@ const onRoleChange = ({ role, userId }: { role: string; userId: string }) => {
 		</N8nDataTableServer>
 	</div>
 </template>
-
-<style lang="scss" module></style>
