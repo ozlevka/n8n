@@ -1,5 +1,5 @@
 ARG NODE_VERSION=22
-ARG GIT_COMMIT_HASH="11fd80e"
+ARG GIT_COMMIT_HASH="e5d65da"
 
 # 1. Create an image to build n8n
 FROM --platform="linux/amd64" ghcr.io/ozlevka/n8n-base:${NODE_VERSION}-${GIT_COMMIT_HASH} AS builder
