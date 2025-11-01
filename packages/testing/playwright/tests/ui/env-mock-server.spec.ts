@@ -2,6 +2,11 @@ import assert from 'node:assert';
 
 import { test, expect } from '../../fixtures/base';
 
+test.use({
+	addContainerCapability: {
+		proxyServerEnabled: true,
+	},
+});
 // @capability:proxy tag ensures that test suite is only run when proxy is available
 test.describe('Proxy server @capability:proxy', () => {
 	test.beforeEach(async ({ proxyServer }) => {
@@ -41,7 +46,7 @@ test.describe('Proxy server @capability:proxy', () => {
 		// Execute workflow - this should now proxy through mockserver
 		await n8n.workflowComposer.executeWorkflowAndWaitForNotification('Successful');
 		await n8n.canvas.openNode('HTTP Request');
-		await expect(n8n.ndv.getOutputTbodyCell(0, 0)).toContainText('Hello from ProxyServer!');
+		await expect(n8n.ndv.outputPanel.getTbodyCell(0, 0)).toContainText('Hello from ProxyServer!');
 
 		// Verify the request was handled by mockserver
 		expect(
@@ -70,6 +75,6 @@ test.describe('Proxy server @capability:proxy', () => {
 		await n8n.canvas.openNode('HTTP Request');
 		await n8n.ndv.setParameterInput('url', 'https://jsonplaceholder.typicode.com/todos/1');
 		await n8n.ndv.execute();
-		await expect(n8n.ndv.getOutputTbodyCell(0, 0)).toContainText('1');
+		await expect(n8n.ndv.outputPanel.getTbodyCell(0, 0)).toContainText('1');
 	});
 });
