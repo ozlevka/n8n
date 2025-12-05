@@ -61,7 +61,7 @@ spec:
               value: "https://n8n.ozlevka.com"
             - name: NODE_FUNCTION_ALLOW_EXTERNAL
               value: "node-fetch"
-          image: ghcr.io/ozlevka/n8n:0.0.7
+          image: ghcr.io/ozlevka/n8n:0.0.8
           name: n8n
           ports:
             - containerPort: 5678
