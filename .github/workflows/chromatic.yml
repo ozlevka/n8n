@@ -43,10 +43,11 @@ jobs:
     if: |
       needs.get-metadata.outputs.is_dispatch == 'true' ||
       (
-       needs.get-metadata.outputs.design_system_files_changed == 'true' &&
-       needs.get-metadata.outputs.is_community_pr == 'false' &&
-       needs.get-metadata.outputs.is_pr_target_master == 'true' &&
-       needs.get-metadata.outputs.is_pr_approved == 'true'
+        github.event_name == 'pull_request_review' &&
+        needs.changeset.outputs.has_changes == 'true' &&
+        github.event.review.state == 'approved' &&
+        !startsWith(github.event.pull_request.head.ref, 'release/') &&
+        !startsWith(github.event.pull_request.head.ref, 'release-pr/')
       )
     runs-on: ubuntu-latest
     steps:

@@ -42,6 +42,12 @@ jobs:
           build-args: |
             NODE_VERSION=${{ inputs.node_version }}
           platforms: linux/amd64,linux/arm64
-          provenance: false
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          provenance: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
+          sbom: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
+          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/base:${{ matrix.node_version }}-${{ github.sha }}
+            ${{ secrets.DOCKER_USERNAME }}/base:${{ matrix.node_version }}
+            ghcr.io/${{ github.repository_owner }}/base:${{ matrix.node_version }}-${{ github.sha }}
+            ghcr.io/${{ github.repository_owner }}/base:${{ matrix.node_version }}
+          no-cache: true

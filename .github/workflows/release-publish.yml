@@ -12,13 +12,14 @@ jobs:
     name: Publish to NPM
     runs-on: ubuntu-latest
     if: github.event.pull_request.merged == true
-    timeout-minutes: 15
+    timeout-minutes: 20
     permissions:
       id-token: write
     env:
       NPM_CONFIG_PROVENANCE: true
     outputs:
       release: ${{ steps.set-release.outputs.release }}
+      release_type: ${{ steps.set-release.outputs.release_type }}
     steps:
       - name: Checkout
         uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
@@ -39,14 +40,20 @@ jobs:
       - name: Set release version in env
         run: echo "RELEASE=$(node -e 'console.log(require("./package.json").version)')" >> "$GITHUB_ENV"
 
-      - name: Build
-        run: pnpm build
+      - name: Determine release type
+        id: release-type
+        run: |
+          VERSION="${{ env.RELEASE }}"
+          if [[ "$VERSION" == *"-rc."* ]]; then
+            echo "type=rc" >> "$GITHUB_OUTPUT"
+          else
+            echo "type=stable" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Cache build artifacts
-        uses: actions/cache/save@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
-        with:
-          path: ./packages/**/dist
-          key: ${{ github.sha }}-release:build
+      - name: Setup and Build
+        uses: ./.github/actions/setup-nodejs-github
+        env:
+          N8N_FAIL_ON_POPULARITY_FETCH_ERROR: true
 
       - name: Dry-run publishing
         run: pnpm publish -r --no-git-checks --dry-run
@@ -57,7 +64,7 @@ jobs:
           node .github/scripts/trim-fe-packageJson.js
           node .github/scripts/ensure-provenance-fields.mjs
           cp README.md packages/cli/README.md
-          sed -i "s/default: 'dev'/default: 'stable'/g" packages/cli/dist/config/schema.js
+          sed -i "s/default: 'dev'/default: '${{ steps.release-type.outputs.type }}'/g" packages/cli/dist/config/schema.js
 
       - name: Publish to NPM
         run: pnpm publish -r --publish-branch ${{github.event.pull_request.base.ref}} --access public --tag rc --no-git-checks
@@ -67,7 +74,9 @@ jobs:
         continue-on-error: true
 
       - id: set-release
-        run: echo "release=${{ env.RELEASE }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "release=${{ env.RELEASE }}" >> "$GITHUB_OUTPUT"
+          echo "release_type=${{ steps.release-type.outputs.type }}" >> "$GITHUB_OUTPUT"
 
   publish-to-docker-hub:
     name: Publish to DockerHub
@@ -75,7 +84,7 @@ jobs:
     uses: ./.github/workflows/docker-build-push.yml
     with:
       n8n_version: ${{ needs.publish-to-npm.outputs.release }}
-      release_type: stable
+      release_type: ${{ needs.publish-to-npm.outputs.release_type }}
     secrets: inherit
 
   create-github-release:
@@ -144,7 +153,9 @@ jobs:
   trigger-release-note:
     name: Trigger a release note
     needs: [publish-to-npm, create-github-release]
-    if: github.event.pull_request.merged == true
+    if: |
+      github.event.pull_request.merged == true &&
+      !contains(needs.publish-to-npm.outputs.release, '-rc.')
     runs-on: ubuntu-latest
     steps:
       - name: Trigger a release note
