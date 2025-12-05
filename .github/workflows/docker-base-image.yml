@@ -34,8 +34,6 @@ jobs:
           echo "tags=ghcr.io/${{ github.repository_owner }}/n8n-base:${{ inputs.node_version }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
           echo "Using tags: ghcr.io/${{ github.repository_owner }}/n8n-base:${{ inputs.node_version }}-${SHORT_SHA}"
 
-      #${{ secrets.DOCKER_USERNAME }}/base:${{ matrix.node_version }}-${{ github.sha }}
-      #${{ secrets.DOCKER_USERNAME }}/base:${{ matrix.node_version }}
       - name: Build and push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
@@ -47,7 +45,5 @@ jobs:
           provenance: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
           sbom: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
           push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/base:${{ inputs.node_version }}-${{ github.sha }}
-            ghcr.io/${{ github.repository_owner }}/base:${{ inputs.node_version }}
+          tags: ${{ steps.tags.outputs.tags }}
           no-cache: true
