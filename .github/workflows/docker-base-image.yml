@@ -7,6 +7,11 @@ on:
         description: 'Node.js version to use'
         required: false
         default: '22'
+      push:
+        description: 'Push image to registry'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   build:
@@ -44,6 +49,6 @@ jobs:
           platforms: linux/amd64,linux/arm64
           provenance: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
           sbom: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
-          push: ${{ github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.push == true) }}
+          push: true
           tags: ${{ steps.tags.outputs.tags }}
           no-cache: true
