@@ -35,6 +35,7 @@ jobs:
         env:
           DOCKER_BUILD_SUMMARY: false
         with:
+          no-cache: true
           context: .
           file: ./docker/images/n8n-custom/Dockerfile
           build-args: |
