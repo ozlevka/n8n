@@ -115,8 +115,8 @@ describe('processError', () => {
 		const workflow = await createWorkflow({}, owner);
 		const execution = await createExecution(
 			{
-				status: 'success',
-				finished: true,
+				status: 'waiting',
+				finished: false,
 			},
 			workflow,
 		);
@@ -238,7 +238,7 @@ describe('run', () => {
 		const data = mock<IWorkflowExecutionDataProcess>({
 			triggerToStartFrom: { name: 'trigger', data: mock<ITaskData>() },
 
-			workflowData: { nodes: [], id: 'workflow-id' },
+			workflowData: { nodes: [], id: 'workflow-id', settings: undefined },
 			executionData: undefined,
 			startNodes: [mock<StartNodeData>()],
 			destinationNode: undefined,
@@ -256,6 +256,8 @@ describe('run', () => {
 		expect(WorkflowExecuteAdditionalData.getBase).toHaveBeenCalledWith({
 			userId: data.userId,
 			workflowId: 'workflow-id',
+			executionTimeoutTimestamp: undefined,
+			workflowSettings: {},
 		});
 		expect(ManualExecutionService.prototype.runManually).toHaveBeenCalledWith(
 			data,
@@ -306,6 +308,39 @@ describe('enqueueExecution', () => {
 		await expect(runner.enqueueExecution('1', 'workflow-xyz', data)).rejects.toThrowError(error);
 
 		expect(setupQueue).toHaveBeenCalledTimes(1);
+	});
+
+	it('should include restartExecutionId in job data when provided', async () => {
+		const activeExecutions = Container.get(ActiveExecutions);
+		jest.spyOn(activeExecutions, 'attachWorkflowExecution').mockReturnValue();
+		jest.spyOn(runner, 'processError').mockResolvedValue();
+		const data = mock<IWorkflowExecutionDataProcess>({
+			workflowData: { nodes: [] },
+			executionData: undefined,
+			pushRef: 'push-ref',
+			streamingEnabled: true,
+		});
+		const error = new Error('stop for test purposes');
+
+		// mock a rejection to stop execution flow before we create the PCancelable promise,
+		// so that Jest does not move on to tear down the suite until the PCancelable settles
+		addJob.mockRejectedValueOnce(error);
+
+		const restartExecutionId = 'restart-execution-id';
+
+		await expect(
+			// @ts-expect-error Private method
+			runner.enqueueExecution('1', 'workflow-xyz', data, false, false, restartExecutionId),
+		).rejects.toThrowError(error);
+
+		expect(addJob).toHaveBeenCalledWith(
+			expect.objectContaining({
+				workflowId: 'workflow-xyz',
+				executionId: '1',
+				restartExecutionId,
+			}),
+			expect.any(Object),
+		);
 	});
 });
 

@@ -5,7 +5,6 @@ import type {
 	IWorkflowSettings,
 	IRunData,
 	ITaskData,
-	IWorkflowBase,
 	AiAgentRequest,
 	IDestinationNode,
 } from 'n8n-workflow';
@@ -27,21 +26,22 @@ export declare namespace WorkflowRequest {
 		projectId: string;
 		parentFolderId?: string;
 		uiContext?: string;
+		expectedChecksum?: string;
+		aiBuilderAssisted?: boolean;
+		autosaved?: boolean;
 	}>;
 
 	// TODO: Use a discriminator when CAT-1809 lands
 	//
 	// 1. Full Manual Execution from Known Trigger
 	type FullManualExecutionFromKnownTriggerPayload = {
-		workflowData: IWorkflowBase;
 		agentRequest?: AiAgentRequest;
-
+		chatSessionId?: string;
 		destinationNode?: IDestinationNode;
 		triggerToStartFrom: { name: string; data?: ITaskData };
 	};
 	// 2. Full Manual Execution from Unknown Trigger
 	type FullManualExecutionFromUnknownTriggerPayload = {
-		workflowData: IWorkflowBase;
 		agentRequest?: AiAgentRequest;
 
 		destinationNode: IDestinationNode;
@@ -49,7 +49,6 @@ export declare namespace WorkflowRequest {
 
 	// 3. Partial Manual Execution to Destination
 	type PartialManualExecutionToDestinationPayload = {
-		workflowData: IWorkflowBase;
 		agentRequest?: AiAgentRequest;
 
 		runData: IRunData;
@@ -96,7 +95,7 @@ export declare namespace WorkflowRequest {
 	type Activate = AuthenticatedRequest<
 		{ workflowId: string },
 		{},
-		{ versionId: string; name?: string; description?: string }
+		{ versionId: string; name?: string; description?: string; expectedChecksum?: string }
 	>;
 
 	type Deactivate = AuthenticatedRequest<{ workflowId: string }>;

@@ -2,86 +2,38 @@ import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
 import type { BaseMessage } from '@langchain/core/messages';
 import { HumanMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
+import type { RunnableConfig } from '@langchain/core/runnables';
 import { z } from 'zod';
+
+import { buildSupervisorPrompt } from '@/prompts';
 
 import type { CoordinationLogEntry } from '../types/coordination';
 import type { SimpleWorkflow } from '../types/workflow';
-import { buildWorkflowSummary } from '../utils/context-builders';
-import { summarizeCoordinationLog } from '../utils/coordination-log';
+import {
+	buildSelectedNodesSummary,
+	buildSimplifiedExecutionContext,
+	buildWorkflowSummary,
+} from '../utils/context-builders';
+import { getCurrentTurnEntries, summarizeCoordinationLog } from '../utils/coordination-log';
+import type { ChatPayload } from '../workflow-builder-agent';
 
-/**
- * Supervisor Agent Prompt
- *
- * Handles INITIAL routing based on user intent.
- * After initial routing, deterministic routing takes over based on coordination log.
- */
-const SUPERVISOR_PROMPT = `You are a Supervisor that routes user requests to specialist agents.
+const ROUTING_OPTIONS_WITH_ASSISTANT = ['responder', 'discovery', 'builder', 'assistant'] as const;
+const ROUTING_OPTIONS_WITHOUT_ASSISTANT = ['responder', 'discovery', 'builder'] as const;
 
-AVAILABLE AGENTS:
-- discovery: Find n8n nodes for building/modifying workflows
-- builder: Create nodes and connections (requires discovery first for new node types)
-- configurator: Set parameters on EXISTING nodes (no structural changes)
-- responder: Answer questions, confirm completion (TERMINAL)
+function createSupervisorRoutingSchema(mergeAskBuild: boolean) {
+	return z.object({
+		reasoning: z.string().describe('One sentence explaining why this agent should act next'),
+		next: z
+			.enum(mergeAskBuild ? ROUTING_OPTIONS_WITH_ASSISTANT : ROUTING_OPTIONS_WITHOUT_ASSISTANT)
+			.describe('The next agent to call'),
+	});
+}
 
-ROUTING DECISION TREE:
-
-1. Is user asking a question or chatting? → responder
-   Examples: "what does this do?", "explain the workflow", "thanks"
-
-2. Does the request involve NEW or DIFFERENT node types? → discovery
-   Examples:
-   - "Build a workflow that..." (new workflow)
-   - "Use [ServiceB] instead of [ServiceA]" (replacing node type)
-   - "Add [some integration]" (new integration)
-   - "Switch from [ServiceA] to [ServiceB]" (swapping services)
-
-3. Is the request about connecting/disconnecting existing nodes? → builder
-   Examples: "Connect node A to node B", "Remove the connection to X"
-
-4. Is the request about changing VALUES in existing nodes? → configurator
-   Examples:
-   - "Change the URL to https://..."
-   - "Set the timeout to 30 seconds"
-   - "Update the email subject to..."
-
-KEY DISTINCTION:
-- "Use [ServiceB] instead of [ServiceA]" = REPLACEMENT = discovery (new node type needed)
-- "Change the [ServiceA] API key" = CONFIGURATION = configurator (same node, different value)
-
-OUTPUT:
-- reasoning: One sentence explaining your routing decision
-- next: Agent name`;
-
-const systemPrompt = ChatPromptTemplate.fromMessages([
-	[
-		'system',
-		[
-			{
-				type: 'text',
-				text:
-					SUPERVISOR_PROMPT +
-					'\n\nGiven the conversation above, which agent should act next? Provide your reasoning and selection.',
-				cache_control: { type: 'ephemeral' },
-			},
-		],
-	],
-	['placeholder', '{messages}'],
-]);
-
-/**
- * Schema for supervisor routing decision
- */
-export const supervisorRoutingSchema = z.object({
-	reasoning: z.string().describe('One sentence explaining why this agent should act next'),
-	next: z
-		.enum(['responder', 'discovery', 'builder', 'configurator'])
-		.describe('The next agent to call'),
-});
-
-export type SupervisorRouting = z.infer<typeof supervisorRoutingSchema>;
+export type SupervisorRouting = z.infer<ReturnType<typeof createSupervisorRoutingSchema>>;
 
 export interface SupervisorAgentConfig {
 	llm: BaseChatModel;
+	mergeAskBuild?: boolean;
 }
 
 /**
@@ -96,19 +48,24 @@ export interface SupervisorContext {
 	coordinationLog: CoordinationLogEntry[];
 	/** Summary of previous conversation (from compaction) */
 	previousSummary?: string;
+	/** Workflow context with execution data */
+	workflowContext?: ChatPayload['workflowContext'];
 }
 
 /**
  * Supervisor Agent
  *
  * Coordinates the multi-agent workflow building process.
- * Routes to Discovery, Builder, or Configurator agents based on current state.
+ * Routes to Discovery or Builder agents based on current state.
  */
 export class SupervisorAgent {
 	private llm: BaseChatModel;
 
+	private mergeAskBuild: boolean;
+
 	constructor(config: SupervisorAgentConfig) {
 		this.llm = config.llm;
+		this.mergeAskBuild = config.mergeAskBuild ?? false;
 	}
 
 	/**
@@ -124,18 +81,30 @@ export class SupervisorAgent {
 			contextParts.push('</previous_conversation_summary>');
 		}
 
-		// 2. Workflow summary (node count and names only)
+		const selectedNodesSummary = buildSelectedNodesSummary(context.workflowContext);
+		if (selectedNodesSummary) {
+			contextParts.push('<selected_nodes>');
+			contextParts.push(selectedNodesSummary);
+			contextParts.push('</selected_nodes>');
+		}
+
 		if (context.workflowJSON.nodes.length > 0) {
 			contextParts.push('<workflow_summary>');
 			contextParts.push(buildWorkflowSummary(context.workflowJSON));
 			contextParts.push('</workflow_summary>');
 		}
 
-		// 3. Coordination log summary (what phases completed)
-		if (context.coordinationLog.length > 0) {
+		const currentTurnLog = getCurrentTurnEntries(context.coordinationLog);
+		if (currentTurnLog.length > 0) {
 			contextParts.push('<completed_phases>');
-			contextParts.push(summarizeCoordinationLog(context.coordinationLog));
+			contextParts.push(summarizeCoordinationLog(currentTurnLog));
 			contextParts.push('</completed_phases>');
+		}
+
+		if (context.workflowContext) {
+			contextParts.push(
+				buildSimplifiedExecutionContext(context.workflowContext, context.workflowJSON.nodes),
+			);
 		}
 
 		if (contextParts.length === 0) {
@@ -147,10 +116,27 @@ export class SupervisorAgent {
 
 	/**
 	 * Invoke the supervisor to get routing decision
+	 * @param context - Supervisor context with messages and workflow state
+	 * @param config - Optional RunnableConfig for tracing callbacks
 	 */
-	async invoke(context: SupervisorContext): Promise<SupervisorRouting> {
-		const agent = systemPrompt.pipe<SupervisorRouting>(
-			this.llm.withStructuredOutput(supervisorRoutingSchema, {
+	async invoke(context: SupervisorContext, config?: RunnableConfig): Promise<SupervisorRouting> {
+		const promptTemplate = ChatPromptTemplate.fromMessages([
+			[
+				'system',
+				[
+					{
+						type: 'text',
+						text: buildSupervisorPrompt({ mergeAskBuild: this.mergeAskBuild }),
+						cache_control: { type: 'ephemeral' },
+					},
+				],
+			],
+			['placeholder', '{messages}'],
+		]);
+
+		const routingSchema = createSupervisorRoutingSchema(this.mergeAskBuild);
+		const agent = promptTemplate.pipe<SupervisorRouting>(
+			this.llm.withStructuredOutput(routingSchema, {
 				name: 'routing_decision',
 			}),
 		);
@@ -160,6 +146,6 @@ export class SupervisorAgent {
 			? [...context.messages, contextMessage]
 			: context.messages;
 
-		return await agent.invoke({ messages: messagesToSend });
+		return await agent.invoke({ messages: messagesToSend }, config);
 	}
 }

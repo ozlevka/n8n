@@ -1,5 +1,40 @@
-import type { ChatHubLLMProvider, ChatModelMetadataDto } from '@n8n/api-types';
-import type { INodeTypeNameVersion } from 'n8n-workflow';
+import type {
+	ChatHubLLMProvider,
+	ChatHubVectorStoreProvider,
+	ChatModelMetadataDto,
+} from '@n8n/api-types';
+import type { ExecutionStatus, INodeTypeNameVersion } from 'n8n-workflow';
+import {
+	CHAT_HUB_VECTOR_STORE_PG_VECTOR_NODE_TYPE,
+	CHAT_HUB_VECTOR_STORE_PINECONE_NODE_TYPE,
+	CHAT_HUB_VECTOR_STORE_QDRANT_NODE_TYPE,
+} from 'n8n-workflow';
+
+import type { ChatTriggerResponseMode } from './chat-hub.types';
+
+export type ChatHubInputModality = 'text' | 'image' | 'audio' | 'video' | 'file';
+
+/** Internal metadata that includes inputModalities for LLM capability checks */
+export interface InternalModelMetadata extends ChatModelMetadataDto {
+	inputModalities: ChatHubInputModality[];
+}
+
+type InternalModelOverride = Partial<
+	Omit<InternalModelMetadata, 'allowFileUploads' | 'allowedFilesMimeTypes'>
+>;
+
+export const EXECUTION_POLL_INTERVAL = 1000;
+export const STREAM_CLOSE_TIMEOUT = 5 * 60 * 1000; // 5 minutes
+export const EXECUTION_FINISHED_STATUSES: ExecutionStatus[] = [
+	'canceled',
+	'crashed',
+	'unknown',
+	'waiting',
+	'error',
+	'success',
+] as const satisfies ExecutionStatus[];
+export const TOOLS_AGENT_NODE_MIN_VERSION = 2.2;
+export const CHAT_TRIGGER_NODE_MIN_VERSION = 1.2;
 
 export const PROVIDER_NODE_TYPE_MAP: Record<ChatHubLLMProvider, INodeTypeNameVersion> = {
 	openai: {
@@ -15,7 +50,7 @@ export const PROVIDER_NODE_TYPE_MAP: Record<ChatHubLLMProvider, INodeTypeNameVer
 		version: 1.2,
 	},
 	ollama: {
-		name: '@n8n/n8n-nodes-langchain.lmOllama',
+		name: '@n8n/n8n-nodes-langchain.lmChatOllama',
 		version: 1,
 	},
 	azureOpenAi: {
@@ -65,6 +100,9 @@ export const NODE_NAMES = {
 	REPLY_AGENT: 'AI Agent',
 	TITLE_GENERATOR_AGENT: 'Title Generator Agent',
 	CHAT_MODEL: 'Chat Model',
+	EMBEDDINGS_MODEL: 'Embeddings Model',
+	VECTOR_STORE: 'Vector Store',
+	DEFAULT_DATA_LOADER: 'Default Data Loader',
 	MEMORY: 'Memory',
 	RESTORE_CHAT_MEMORY: 'Restore Chat Memory',
 	CLEAR_CHAT_MEMORY: 'Clear Chat Memory',
@@ -80,16 +118,20 @@ export const JSONL_STREAM_HEADERS = {
 };
 /* eslint-enable @typescript-eslint/naming-convention */
 
-// Default metadata for all models
-const DEFAULT_MODEL_METADATA: ChatModelMetadataDto = {
+// Default internal metadata for all LLM models
+const DEFAULT_INTERNAL_METADATA: InternalModelOverride &
+	Pick<InternalModelMetadata, 'inputModalities' | 'available'> & {
+		capabilities: { functionCalling: boolean };
+	} = {
 	inputModalities: ['text', 'image', 'audio', 'video', 'file'],
 	capabilities: {
 		functionCalling: true,
 	},
+	available: true,
 };
 
 const MODEL_METADATA_REGISTRY: Partial<
-	Record<ChatHubLLMProvider, Partial<Record<string, Partial<ChatModelMetadataDto>>>>
+	Record<ChatHubLLMProvider, Partial<Record<string, InternalModelOverride>>>
 > = {
 	anthropic: {
 		'claude-3-5-haiku-20241022': {
@@ -113,11 +155,21 @@ const MODEL_METADATA_REGISTRY: Partial<
 		'claude-sonnet-4-20250514': {
 			inputModalities: ['text', 'image'],
 		},
-		'claude-sonnet-4-5-20250929': {
-			inputModalities: ['text', 'image'],
-		},
 		'claude-haiku-4-5-20251001': {
 			inputModalities: ['text', 'image'],
+			priority: 70,
+		},
+		'claude-sonnet-4-5-20250929': {
+			inputModalities: ['text', 'image'],
+			priority: 80,
+		},
+		'claude-opus-4-6': {
+			inputModalities: ['text', 'image'],
+			priority: 100,
+		},
+		'claude-opus-4-5-20251101': {
+			inputModalities: ['text', 'image'],
+			priority: 90,
 		},
 		'claude-opus-4-20250514': {
 			inputModalities: ['text', 'image'],
@@ -127,29 +179,67 @@ const MODEL_METADATA_REGISTRY: Partial<
 		},
 	},
 	openai: {
+		// Search models - specialized for search, not general chat
 		'gpt-4o-mini-search-preview': {
-			inputModalities: ['text'],
-			capabilities: {
-				functionCalling: false,
-			},
+			available: false,
 		},
 		'gpt-4o-mini-search-preview-2025-03-11': {
-			inputModalities: ['text'],
-			capabilities: {
-				functionCalling: false,
-			},
+			available: false,
 		},
 		'gpt-4o-search-preview': {
-			inputModalities: ['text'],
-			capabilities: {
-				functionCalling: false,
-			},
+			available: false,
 		},
 		'gpt-4o-search-preview-2025-03-11': {
-			inputModalities: ['text'],
-			capabilities: {
-				functionCalling: false,
-			},
+			available: false,
+		},
+		'gpt-5-search-api': {
+			available: false,
+		},
+		'gpt-5-search-api-2025-10-14': {
+			available: false,
+		},
+		// Transcription models - for speech-to-text, not chat
+		'gpt-4o-transcribe': {
+			available: false,
+		},
+		'gpt-4o-mini-transcribe': {
+			available: false,
+		},
+		'gpt-4o-transcribe-diarize': {
+			available: false,
+		},
+		// Image generation models - for creating images, not chat
+		'gpt-image-1': {
+			available: false,
+		},
+		'gpt-image-1-mini': {
+			available: false,
+		},
+		// Deep research models - long-running research, not interactive chat
+		'o4-mini-deep-research': {
+			available: false,
+		},
+		'o4-mini-deep-research-2025-06-26': {
+			available: false,
+		},
+		// Audio models - designed for audio I/O, not text chat
+		'gpt-4o-audio-preview': {
+			available: false,
+		},
+		'gpt-4o-audio-preview-2024-10-01': {
+			available: false,
+		},
+		'gpt-4o-audio-preview-2024-12-17': {
+			available: false,
+		},
+		'gpt-4o-audio-preview-2025-06-03': {
+			available: false,
+		},
+		'gpt-4o-mini-audio-preview': {
+			available: false,
+		},
+		'gpt-4o-mini-audio-preview-2024-12-17': {
+			available: false,
 		},
 		'gpt-3.5-turbo': {
 			inputModalities: ['text'],
@@ -175,28 +265,78 @@ const MODEL_METADATA_REGISTRY: Partial<
 		'o1-pro-2025-03-19': {
 			inputModalities: ['text'],
 		},
-		'o3-mini': {
-			inputModalities: ['text'],
+		'gpt-audio': {
+			available: false,
+		},
+		'gpt-audio-2025-08-28': {
+			available: false,
+		},
+		'gpt-audio-mini': {
+			available: false,
+		},
+		'gpt-audio-mini-2025-10-06': {
+			available: false,
+		},
+		'gpt-3.5-turbo-16k': {
+			available: false,
+		},
+		'gpt-5.2': {
+			priority: 100,
+		},
+		'gpt-5.2-pro': {
+			priority: 99,
+		},
+		'gpt-5.1': {
+			priority: 90,
+		},
+		'gpt-5-pro': {
+			priority: 85,
+		},
+		'gpt-5': {
+			priority: 84,
+		},
+		'gpt-5-mini': {
+			priority: 83,
+		},
+		'gpt-5-nano': {
+			priority: 82,
+		},
+		'gpt-4.1': {
+			priority: 80,
+		},
+		'gpt-4.1-mini': {
+			priority: 79,
+		},
+		'gpt-4.1-nano': {
+			priority: 78,
 		},
 		'o4-mini': {
 			inputModalities: ['text'],
+			priority: 70,
 		},
 		'o4-mini-2025-04-16': {
 			inputModalities: ['text'],
 		},
 		'o4-mini-high': {
 			inputModalities: ['text'],
+			priority: 69,
 		},
 		o3: {
 			inputModalities: ['text'],
-		},
-		'o3-2025-04-16': {
-			inputModalities: ['text'],
+			priority: 60,
 		},
 		'o3-pro': {
 			inputModalities: ['text'],
+			priority: 59,
 		},
 		'o3-pro-2025-06-10': {
+			inputModalities: ['text'],
+		},
+		'o3-mini': {
+			inputModalities: ['text'],
+			priority: 58,
+		},
+		'o3-2025-04-16': {
 			inputModalities: ['text'],
 		},
 	},
@@ -262,21 +402,37 @@ const MODEL_METADATA_REGISTRY: Partial<
 		'ministral-8b-latest': {
 			inputModalities: ['text'],
 		},
+		'mistral-moderation-2411': {
+			available: false,
+		},
+		'mistral-moderation-latest': {
+			available: false,
+		},
+		'mistral-ocr-2503': {
+			available: false,
+		},
+		'mistral-ocr-2505': {
+			available: false,
+		},
+		'mistral-ocr-latest': {
+			available: false,
+		},
+		'voxtral-mini-transcribe-2507': {
+			available: false,
+		},
 	},
 	// Reference: https://ai.google.dev/gemini-api/docs/models
 	google: {
 		// Gemini 3 series - latest models with advanced multimodal understanding
-		'models/gemini-3-pro-preview': {},
 		'models/gemini-3-pro-image-preview': {
 			inputModalities: ['text', 'image'],
 			capabilities: { functionCalling: false },
 		},
 		// Gemini 2.5 Pro series
-		'models/gemini-2.5-pro': {},
-		'models/gemini-2.5-pro-exp-03-25': {},
-		'models/gemini-2.5-pro-preview-03-25': {},
-		'models/gemini-2.5-pro-preview-05-06': {},
-		'models/gemini-2.5-pro-preview-06-05': {},
+		'models/gemini-2.5-pro': {
+			inputModalities: ['text', 'image', 'video', 'audio'],
+			priority: 100,
+		},
 		'models/gemini-2.5-pro-preview-tts': {
 			inputModalities: ['text'],
 			capabilities: { functionCalling: false },
@@ -284,6 +440,7 @@ const MODEL_METADATA_REGISTRY: Partial<
 		// Gemini 2.5 Flash series
 		'models/gemini-2.5-flash': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
+			priority: 90,
 		},
 		'models/gemini-2.5-flash-preview-04-17': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
@@ -312,15 +469,10 @@ const MODEL_METADATA_REGISTRY: Partial<
 		'models/gemini-live-2.5-flash-preview': {
 			inputModalities: ['text', 'audio', 'video'],
 		},
-		// Gemini 2.5 Flash-Lite series
-		'models/gemini-2.5-flash-lite': {},
-		'models/gemini-2.5-flash-lite-preview-06-17': {},
-		'models/gemini-2.5-flash-lite-preview-09-2025': {},
-		// Gemini 2.0 Pro series
-		'models/gemini-2.0-pro-exp-02-05': {},
 		// Gemini 2.0 Flash series
 		'models/gemini-2.0-flash': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
+			priority: 80,
 		},
 		'models/gemini-2.0-flash-001': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
@@ -343,6 +495,7 @@ const MODEL_METADATA_REGISTRY: Partial<
 		// Gemini 2.0 Flash-Lite series
 		'models/gemini-2.0-flash-lite': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
+			priority: 60,
 		},
 		'models/gemini-2.0-flash-lite-001': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
@@ -353,27 +506,241 @@ const MODEL_METADATA_REGISTRY: Partial<
 		'models/gemini-2.0-flash-lite-preview-02-05': {
 			inputModalities: ['text', 'image', 'video', 'audio'],
 		},
+		'models/aqa': {
+			priority: -1,
+		},
+	},
+	groq: {
+		'meta-llama/llama-prompt-guard-2-22m': {
+			available: false,
+		},
+		'meta-llama/llama-prompt-guard-2-86m': {
+			available: false,
+		},
+		'whisper-large-v3': {
+			available: false,
+		},
+		'whisper-large-v3-turbo': {
+			available: false,
+		},
+	},
+	vercelAiGateway: {
+		'alibaba/qwen3-embedding-0.6b': {
+			available: false,
+		},
+		'alibaba/qwen3-embedding-4b': {
+			available: false,
+		},
+		'alibaba/qwen3-embedding-8b': {
+			available: false,
+		},
+		'amazon/titan-embed-text-v2': {
+			available: false,
+		},
+		'cohere/embed-v4.0': {
+			available: false,
+		},
+		'google/gemini-embedding-001': {
+			available: false,
+		},
+		'google/text-embedding-005': {
+			available: false,
+		},
+		'google/text-multilingual-embedding-002': {
+			available: false,
+		},
+		'mistral/codestral-embed': {
+			available: false,
+		},
+		'mistral/mistral-embed': {
+			available: false,
+		},
+		'openai/text-embedding-3-large': {
+			available: false,
+		},
+		'openai/text-embedding-3-small': {
+			available: false,
+		},
+		'openai/text-embedding-ada-002': {
+			available: false,
+		},
+		'bfl/flux-kontext-max': {
+			available: false,
+		},
+		'bfl/flux-kontext-pro': {
+			available: false,
+		},
+		'bfl/flux-pro-1.0-fill': {
+			available: false,
+		},
+		'bfl/flux-pro-1.1': {
+			available: false,
+		},
+		'bfl/flux-pro-1.1-ultra': {
+			available: false,
+		},
+		'google/imagen-4.0-fast-generate-001': {
+			available: false,
+		},
+		'google/imagen-4.0-generate-001': {
+			available: false,
+		},
+		'google/imagen-4.0-ultra-generate-001': {
+			available: false,
+		},
+		// Instruct models - not suitable for chat
+		'openai/gpt-3.5-turbo-instruct': {
+			available: false,
+		},
+		// Deep research models - require specific tools
+		'openai/o3-deep-research': {
+			available: false,
+		},
+		// Model not found - may have been deprecated
+		'meituan/longcat-flash-thinking': {
+			available: false,
+		},
+		// Voyage models - language model method not implemented
+		'voyage/voyage-3-large': {
+			available: false,
+		},
+		'voyage/voyage-3.5': {
+			available: false,
+		},
+		'voyage/voyage-3.5-lite': {
+			available: false,
+		},
+		'voyage/voyage-code-2': {
+			available: false,
+		},
+		'voyage/voyage-code-3': {
+			available: false,
+		},
+		'voyage/voyage-finance-2': {
+			available: false,
+		},
+		'voyage/voyage-law-2': {
+			available: false,
+		},
+	},
+	openRouter: {
+		'openai/gpt-4o-audio-preview': {
+			available: false, // "Provider returned error"
+		},
+		'morph/morph-v3-fast': {
+			available: false, // Not supporting multi-turn conversations
+		},
+		'morph/morph-v3-large': {
+			available: false, // Not supporting multi-turn conversations
+		},
+		'relace/relace-apply-3': {
+			available: false, // Not supporting multi-turn conversations
+		},
+	},
+	xAiGrok: {
+		'grok-4-1-fast-non-reasoning': {
+			priority: 100,
+		},
+		'grok-4-1-fast-reasoning': {
+			priority: 99,
+		},
+		'grok-4-fast-non-reasoning': {
+			priority: 90,
+		},
+		'grok-4-fast-reasoning': {
+			priority: 89,
+		},
+		'grok-4-0709': {
+			priority: 88,
+		},
+		'grok-3': {
+			priority: 80,
+		},
+		'grok-3-mini': {
+			priority: 79,
+		},
+		'grok-2-1212': {
+			priority: 70,
+		},
 	},
 };
+
+const TEXT_COMMON_MIME_TYPES = ['text/css', 'text/csv', 'text/markdown', 'text/plain'];
+
+/**
+ * Application/* MIME types accepted for the 'text' input modality.
+ */
+const TEXT_APPLICATION_MIME_TYPES = [
+	'application/json',
+	'application/xml',
+	'application/csv',
+	'application/x-yaml',
+	'application/yaml',
+	'application/ld+json',
+	'application/xhtml+xml',
+	'application/javascript',
+	'application/rtf',
+];
+
+/** Resolves inputModalities into MIME type string for the API response */
+function resolveAllowedMimeTypes(modalities: ChatHubInputModality[]): string {
+	if (modalities.includes('file')) {
+		return '*/*';
+	}
+
+	const mimeTypes: string[] = [];
+
+	for (const modality of modalities) {
+		if (modality === 'text') {
+			mimeTypes.push('text/*', ...TEXT_COMMON_MIME_TYPES, ...TEXT_APPLICATION_MIME_TYPES);
+		}
+		if (modality === 'image') {
+			mimeTypes.push('image/*');
+		}
+		if (modality === 'audio') {
+			mimeTypes.push('audio/*');
+		}
+		if (modality === 'video') {
+			mimeTypes.push('video/*');
+		}
+	}
+
+	return mimeTypes.join(',');
+}
 
 export function getModelMetadata(
 	provider: ChatHubLLMProvider,
 	modelId: string,
-): ChatModelMetadataDto {
+): InternalModelMetadata {
 	const providerModels = MODEL_METADATA_REGISTRY[provider];
 	const modelOverride = providerModels?.[modelId];
 
-	if (!modelOverride) {
-		return DEFAULT_MODEL_METADATA;
-	}
+	const inputModalities =
+		modelOverride?.inputModalities ?? DEFAULT_INTERNAL_METADATA.inputModalities;
 
-	// Merge override with default metadata
 	return {
-		inputModalities: modelOverride.inputModalities ?? DEFAULT_MODEL_METADATA.inputModalities,
+		inputModalities,
+		// LLM providers always allow file uploads
+		allowFileUploads: true,
+		allowedFilesMimeTypes: resolveAllowedMimeTypes(inputModalities),
+		priority: modelOverride?.priority,
 		capabilities: {
 			functionCalling:
-				modelOverride.capabilities?.functionCalling ??
-				DEFAULT_MODEL_METADATA.capabilities.functionCalling,
+				modelOverride?.capabilities?.functionCalling ??
+				DEFAULT_INTERNAL_METADATA.capabilities.functionCalling,
 		},
+		available: modelOverride?.available ?? true,
 	};
 }
+
+export const SUPPORTED_RESPONSE_MODES: ChatTriggerResponseMode[] = [
+	'streaming',
+	'lastNode',
+	'responseNodes',
+] as const;
+
+export const VECTOR_STORE_NODE_TYPE_MAP: Record<ChatHubVectorStoreProvider, string> = {
+	pgvector: CHAT_HUB_VECTOR_STORE_PG_VECTOR_NODE_TYPE,
+	pinecone: CHAT_HUB_VECTOR_STORE_PINECONE_NODE_TYPE,
+	qdrant: CHAT_HUB_VECTOR_STORE_QDRANT_NODE_TYPE,
+};

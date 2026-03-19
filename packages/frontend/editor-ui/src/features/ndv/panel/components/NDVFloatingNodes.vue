@@ -2,11 +2,10 @@
 import type { INodeUi } from '@/Interface';
 import { useNodeTypesStore } from '@/app/stores/nodeTypes.store';
 import { useWorkflowsStore } from '@/app/stores/workflows.store';
+import { injectWorkflowDocumentStore } from '@/app/stores/workflowDocument.store';
 import { computed, onMounted, onBeforeUnmount } from 'vue';
 import NodeIcon from '@/app/components/NodeIcon.vue';
 import { NodeConnectionTypes, type INodeTypeDescription } from 'n8n-workflow';
-import { NDV_UI_OVERHAUL_EXPERIMENT } from '@/app/constants';
-import { usePostHog } from '@/app/stores/posthog.store';
 
 import { N8nTooltip } from '@n8n/design-system';
 interface Props {
@@ -19,8 +18,8 @@ const enum FloatingNodePosition {
 }
 const props = defineProps<Props>();
 const workflowsStore = useWorkflowsStore();
+const workflowDocumentStore = injectWorkflowDocumentStore();
 const nodeTypesStore = useNodeTypesStore();
-const posthogStore = usePostHog();
 const emit = defineEmits<{
 	switchSelectedNode: [nodeName: string];
 }>();
@@ -30,12 +29,7 @@ interface NodeConfig {
 	nodeType: INodeTypeDescription;
 }
 
-const isNDVV2 = computed(() =>
-	posthogStore.isVariantEnabled(
-		NDV_UI_OVERHAUL_EXPERIMENT.name,
-		NDV_UI_OVERHAUL_EXPERIMENT.variant,
-	),
-);
+const isNDVV2 = computed(() => true);
 
 function moveNodeDirection(direction: FloatingNodePosition) {
 	const matchedDirectionNode = connectedNodes.value[direction][0];
@@ -61,7 +55,7 @@ function onKeyDown(e: KeyboardEvent) {
 function getINodesFromNames(names: string[]): NodeConfig[] {
 	return names
 		.map((name) => {
-			const node = workflowsStore.getNodeByName(name);
+			const node = workflowDocumentStore?.value?.getNodeByName(name) ?? null;
 			if (node) {
 				const nodeType = nodeTypesStore.getNodeType(node.type);
 				if (nodeType) {

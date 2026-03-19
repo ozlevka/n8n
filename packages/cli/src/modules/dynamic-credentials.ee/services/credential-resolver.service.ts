@@ -1,13 +1,16 @@
 import { Logger } from '@n8n/backend-common';
+import { User } from '@n8n/db';
 import {
 	CredentialResolverConfiguration,
 	CredentialResolverValidationError,
+	ICredentialResolver,
 } from '@n8n/decorators';
 import { Service } from '@n8n/di';
 import { Cipher } from 'n8n-core';
 import { jsonParse, UnexpectedError } from 'n8n-workflow';
 
 import { DynamicCredentialResolverRegistry } from './credential-resolver-registry.service';
+import { ResolverConfigExpressionService } from './resolver-config-expression.service';
 import { DynamicCredentialResolver } from '../database/entities/credential-resolver';
 import { DynamicCredentialResolverRepository } from '../database/repositories/credential-resolver.repository';
 import { DynamicCredentialResolverNotFoundError } from '../errors/credential-resolver-not-found.error';
@@ -16,11 +19,15 @@ export interface CreateResolverParams {
 	name: string;
 	type: string;
 	config: CredentialResolverConfiguration;
+	user: User;
 }
 
 export interface UpdateResolverParams {
 	name?: string;
+	type?: string;
 	config?: CredentialResolverConfiguration;
+	clearCredentials?: boolean;
+	user: User;
 }
 
 /**
@@ -28,6 +35,7 @@ export interface UpdateResolverParams {
  * Provides CRUD operations with:
  * - Config encryption at rest
  * - Validation against resolver type's config schema
+ * - Expression resolution in config values
  */
 @Service()
 export class DynamicCredentialResolverService {
@@ -36,6 +44,7 @@ export class DynamicCredentialResolverService {
 		private readonly repository: DynamicCredentialResolverRepository,
 		private readonly registry: DynamicCredentialResolverRegistry,
 		private readonly cipher: Cipher,
+		private readonly expressionService: ResolverConfigExpressionService,
 	) {
 		this.logger = this.logger.scoped('dynamic-credentials');
 	}
@@ -58,7 +67,7 @@ export class DynamicCredentialResolverService {
 		const saved = await this.repository.save(resolver);
 		this.logger.debug(`Created credential resolver "${saved.name}" (${saved.id})`);
 
-		return saved;
+		return this.withDecryptedConfig(saved);
 	}
 
 	/**
@@ -68,6 +77,13 @@ export class DynamicCredentialResolverService {
 	async findAll(): Promise<DynamicCredentialResolver[]> {
 		const resolvers = await this.repository.find();
 		return resolvers.map((resolver) => this.withDecryptedConfig(resolver));
+	}
+
+	/**
+	 * Retrieves all available resolver types.
+	 */
+	getAvailableTypes(): ICredentialResolver[] {
+		return this.registry.getAllResolvers();
 	}
 
 	/**
@@ -94,6 +110,15 @@ export class DynamicCredentialResolverService {
 			throw new DynamicCredentialResolverNotFoundError(id);
 		}
 
+		if (params.type !== undefined) {
+			existing.type = params.type;
+			// Re-validate existing config against new type if config wasn't provided
+			if (params.config === undefined) {
+				const existingConfig = this.decryptConfig(existing.config);
+				await this.validateConfig(existing.type, existingConfig);
+			}
+		}
+
 		if (params.config !== undefined) {
 			await this.validateConfig(existing.type, params.config);
 			existing.config = this.encryptConfig(params.config);
@@ -101,6 +126,22 @@ export class DynamicCredentialResolverService {
 
 		if (params.name !== undefined) {
 			existing.name = params.name;
+		}
+
+		if (params.clearCredentials === true) {
+			const resolver = this.registry.getResolverByTypename(existing.type);
+
+			if (!resolver) {
+				throw new CredentialResolverValidationError(`Unknown resolver type: ${existing.type}`);
+			}
+
+			if ('deleteAllSecrets' in resolver && typeof resolver.deleteAllSecrets === 'function') {
+				await resolver.deleteAllSecrets({
+					resolverId: id,
+					resolverName: resolver.metadata.name,
+					configuration: this.decryptConfig(existing.config),
+				});
+			}
 		}
 
 		const saved = await this.repository.save(existing);
@@ -125,18 +166,31 @@ export class DynamicCredentialResolverService {
 
 	/**
 	 * Validates the config against the resolver type's schema.
+	 * Resolves expressions
 	 * @throws {CredentialResolverValidationError} When the resolver type is unknown or config is invalid
 	 */
 	private async validateConfig(
 		type: string,
 		config: CredentialResolverConfiguration,
 	): Promise<void> {
-		const resolverImplementation = this.registry.getResolverByName(type);
+		const resolverImplementation = this.registry.getResolverByTypename(type);
 		if (!resolverImplementation) {
 			throw new CredentialResolverValidationError(`Unknown resolver type: ${type}`);
 		}
 
-		await resolverImplementation.validateOptions(config);
+		// Resolve expressions in the config to validate syntax
+		let resolvedConfig = config;
+		try {
+			resolvedConfig = await this.expressionService.resolve(config);
+		} catch (error) {
+			// If expression resolution fails, it means there's a syntax error
+			throw new CredentialResolverValidationError(
+				`Invalid expression in resolver config: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+
+		// Validate the resolved config against the resolver's schema
+		await resolverImplementation.validateOptions(resolvedConfig);
 	}
 
 	/**

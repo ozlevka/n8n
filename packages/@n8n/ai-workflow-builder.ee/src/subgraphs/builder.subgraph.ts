@@ -1,269 +1,84 @@
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { BaseMessage } from '@langchain/core/messages';
 import { ChatPromptTemplate } from '@langchain/core/prompts';
+import type { Runnable } from '@langchain/core/runnables';
 import type { StructuredTool } from '@langchain/core/tools';
 import { Annotation, StateGraph } from '@langchain/langgraph';
 import type { Logger } from '@n8n/backend-common';
 import type { INodeTypeDescription } from 'n8n-workflow';
 
 import { LLMServiceError } from '@/errors';
-import type { ChatPayload } from '@/workflow-builder-agent';
+import { buildBuilderPrompt, INSTANCE_URL_PROMPT, buildRecoveryModeContext } from '@/prompts';
+import type { ResourceLocatorCallback } from '@/types/callbacks';
+import { autoFixConnections } from '@/validation/auto-fix';
+import { validateConnections } from '@/validation/checks';
+import type { BuilderFeatureFlags, ChatPayload } from '@/workflow-builder-agent';
 
 import { BaseSubgraph } from './subgraph-interface';
 import type { ParentGraphState } from '../parent-graph-state';
+// Tools (alphabetically ordered)
 import { createAddNodeTool } from '../tools/add-node.tool';
 import { createConnectNodesTool } from '../tools/connect-nodes.tool';
+import { createGetExecutionLogsTool } from '../tools/get-execution-logs.tool';
+import { createGetExecutionSchemaTool } from '../tools/get-execution-schema.tool';
+import { createGetExpressionDataMappingTool } from '../tools/get-expression-data-mapping.tool';
+import { createGetNodeContextTool } from '../tools/get-node-context.tool';
+import {
+	createGetNodeConnectionExamplesTool,
+	createGetNodeConfigurationExamplesTool,
+} from '../tools/get-node-examples.tool';
+import { createGetNodeParameterTool } from '../tools/get-node-parameter.tool';
+import { createGetResourceLocatorOptionsTool } from '../tools/get-resource-locator-options.tool';
+import { createGetWorkflowOverviewTool } from '../tools/get-workflow-overview.tool';
+import {
+	createIntrospectTool,
+	extractIntrospectionEventsFromMessages,
+} from '../tools/introspect.tool';
 import { createRemoveConnectionTool } from '../tools/remove-connection.tool';
 import { createRemoveNodeTool } from '../tools/remove-node.tool';
+import { createRenameNodeTool } from '../tools/rename-node.tool';
+import { createUpdateNodeParametersTool } from '../tools/update-node-parameters.tool';
+import { mermaidStringify } from '../tools/utils/mermaid.utils';
+import { createValidateConfigurationTool } from '../tools/validate-configuration.tool';
 import { createValidateStructureTool } from '../tools/validate-structure.tool';
+// Types and utilities
 import type { CoordinationLogEntry } from '../types/coordination';
 import { createBuilderMetadata } from '../types/coordination';
 import type { DiscoveryContext } from '../types/discovery-types';
+import { isBaseMessage } from '../types/langchain';
+import type { WorkflowMetadata } from '../types/tools';
 import type { SimpleWorkflow, WorkflowOperation } from '../types/workflow';
 import { applySubgraphCacheMarkers } from '../utils/cache-control';
 import {
+	buildConversationContext,
 	buildDiscoveryContextBlock,
 	buildWorkflowJsonBlock,
 	buildExecutionSchemaBlock,
+	buildExecutionContextBlock,
+	buildSelectedNodesContextBlock,
 	createContextMessage,
 } from '../utils/context-builders';
 import { processOperations } from '../utils/operations-processor';
+import { formatPlanAsText } from '../utils/plan-helpers';
+import {
+	detectRLCParametersForPrefetch,
+	prefetchRLCOptions,
+	formatPrefetchedOptionsForLLM,
+	type RLCPrefetchResult,
+} from '../utils/rlc-prefetch';
+import { cachedTemplatesReducer } from '../utils/state-reducers';
+import type { BuilderTool } from '../utils/stream-processor';
 import {
 	executeSubgraphTools,
 	extractUserRequest,
 	createStandardShouldContinue,
+	extractToolMessagesForPersistence,
 } from '../utils/subgraph-helpers';
 
 /**
- * Builder Agent Prompt
- */
-const BUILDER_PROMPT = `You are a Builder Agent specialized in constructing n8n workflows.
-
-MANDATORY EXECUTION SEQUENCE:
-You MUST follow these steps IN ORDER. Do not skip any step.
-
-STEP 1: CREATE NODES
-- Call add_nodes for EVERY node needed based on discovery results
-- Create multiple nodes in PARALLEL for efficiency
-- Do NOT respond with text - START BUILDING immediately
-
-STEP 2: CONNECT NODES
-- Call connect_nodes for ALL required connections
-- Connect multiple node pairs in PARALLEL
-
-STEP 3: VALIDATE (REQUIRED)
-- After ALL nodes and connections are created, call validate_structure
-- This step is MANDATORY - you cannot finish without it
-- If validation finds issues (missing trigger, invalid connections), fix them and validate again
-- MAXIMUM 3 VALIDATION ATTEMPTS: After 3 calls to validate_structure, proceed to respond regardless of remaining issues
-
-STEP 4: RESPOND TO USER
-- Only after validation passes, provide your brief summary
-
-⚠️ NEVER respond to the user without calling validate_structure first ⚠️
-
-NODE CREATION:
-Each add_nodes call creates ONE node. You must provide:
-- nodeType: The exact type from discovery (e.g., "n8n-nodes-base.httpRequest")
-- name: Descriptive name (e.g., "Fetch Weather Data")
-- connectionParametersReasoning: Explain your thinking about connection parameters
-- connectionParameters: Parameters that affect connections (or {{}} if none needed)
-
-<workflow_configuration_node>
-Always include a Workflow Configuration node at the start of every workflow.
-
-The Workflow Configuration node (n8n-nodes-base.set) should be placed immediately after the trigger node and before all other processing nodes.
-
-Placement rules:
-- Add between trigger and first processing node
-- Connect: Trigger → Workflow Configuration → First processing node
-- Name it "Workflow Configuration"
-</workflow_configuration_node>
-
-<data_parsing_strategy>
-For AI-generated structured data, prefer Structured Output Parser nodes over Code nodes.
-For binary file data, use Extract From File node to extract content from files before processing.
-Use Code nodes only for custom business logic beyond parsing.
-
-STRUCTURED OUTPUT PARSER RULE:
-When Discovery results include Structured Output Parser:
-1. Create the Structured Output Parser node
-2. Set AI Agent's hasOutputParser: true in connectionParameters
-3. Connect: Structured Output Parser → AI Agent (ai_outputParser connection)
-</data_parsing_strategy>
-
-<proactive_design>
-Anticipate workflow needs:
-- IF nodes for conditional logic when multiple outcomes exist
-- Set nodes for data transformation between incompatible formats
-- Schedule Triggers for recurring tasks
-- Error handling for external service calls
-
-NEVER use Split In Batches nodes.
-</proactive_design>
-
-<node_defaults_warning>
-CRITICAL: NEVER RELY ON DEFAULT PARAMETER VALUES FOR CONNECTIONS
-
-Default values often hide connection inputs/outputs. You MUST explicitly configure parameters that affect connections:
-- Vector Store: Mode parameter affects available connections - always set explicitly (e.g., mode: "insert", "retrieve", "retrieve-as-tool")
-- AI Agent: hasOutputParser default may not match your workflow needs
-- Document Loader: textSplittingMode affects whether it accepts a text splitter input
-
-ALWAYS check node details and set connectionParameters explicitly.
-</node_defaults_warning>
-
-CONNECTION PARAMETERS EXAMPLES:
-- Static nodes (HTTP Request, Set, Code): reasoning="Static inputs/outputs", parameters={{}}
-- AI Agent with structured output: reasoning="hasOutputParser enables ai_outputParser input for Structured Output Parser", parameters={{ hasOutputParser: true }}
-- Vector Store insert: reasoning="Insert mode requires document input", parameters={{ mode: "insert" }}
-- Document Loader custom: reasoning="Custom mode enables text splitter input", parameters={{ textSplittingMode: "custom" }}
-- Switch with routing rules: reasoning="Switch needs N outputs, creating N rules.values entries with outputKeys", parameters={{ mode: "rules", rules: {{ values: [...] }} }} - see <switch_node_pattern> for full structure
-
-<structured_output_parser_guidance>
-WHEN TO SET hasOutputParser: true on AI Agent:
-- Discovery found Structured Output Parser node → MUST set hasOutputParser: true
-- AI output will be used in conditions (IF/Switch nodes checking $json.field)
-- AI output will be formatted/displayed (HTML emails, reports with specific sections)
-- AI output will be stored in database/data tables with specific fields
-- AI is classifying, scoring, or extracting specific data fields
-</structured_output_parser_guidance>
-
-<node_connections_understanding>
-n8n connections flow from SOURCE (output) to TARGET (input).
-
-Regular data flow: Source node output → Target node input
-Example: HTTP Request → Set (HTTP Request is source, Set is target)
-
-AI sub-nodes PROVIDE capabilities, making them the SOURCE:
-- OpenAI Chat Model → AI Agent [ai_languageModel]
-- Calculator Tool → AI Agent [ai_tool]
-- Window Buffer Memory → AI Agent [ai_memory]
-- Token Splitter → Default Data Loader [ai_textSplitter]
-- Default Data Loader → Vector Store [ai_document]
-- Embeddings OpenAI → Vector Store [ai_embedding]
-</node_connections_understanding>
-
-<agent_node_distinction>
-Distinguish between two different agent node types:
-
-1. **AI Agent** (@n8n/n8n-nodes-langchain.agent)
-   - Main workflow node that orchestrates AI tasks
-   - Use for: Primary AI logic, chatbots, autonomous workflows
-
-2. **AI Agent Tool** (@n8n/n8n-nodes-langchain.agentTool)
-   - Sub-node that acts as a tool for another AI Agent
-   - Use for: Multi-agent systems where one agent calls another
-
-Default assumption: When discovery results include "agent", use AI Agent
-unless explicitly specified as "agent tool" or "sub-agent".
-</agent_node_distinction>
-
-<rag_workflow_pattern>
-For RAG (Retrieval-Augmented Generation) workflows:
-
-Main data flow:
-- Data source (e.g., HTTP Request) → Vector Store [main connection]
-
-AI capability connections:
-- Document Loader → Vector Store [ai_document]
-- Embeddings → Vector Store [ai_embedding]
-- Text Splitter → Document Loader [ai_textSplitter]
-
-Common mistake to avoid:
-- NEVER connect Document Loader to main data outputs
-- Document Loader is an AI sub-node that gives Vector Store document processing capability
-</rag_workflow_pattern>
-
-<switch_node_pattern>
-For Switch nodes with multiple routing paths:
-- The number of outputs is determined by the number of entries in rules.values[]
-- You MUST create the rules.values[] array with placeholder entries for each output branch
-- Each entry needs: conditions structure (with empty leftValue/rightValue) + renameOutput: true + descriptive outputKey
-- Configurator will fill in the actual condition values later
-- Use descriptive node names like "Route by Amount" or "Route by Status"
-
-Example connectionParameters for 3-way routing:
-{{
-  "mode": "rules",
-  "rules": {{
-    "values": [
-      {{
-        "conditions": {{
-          "options": {{ "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }},
-          "conditions": [{{ "leftValue": "", "rightValue": "", "operator": {{ "type": "string", "operation": "equals" }} }}],
-          "combinator": "and"
-        }},
-        "renameOutput": true,
-        "outputKey": "Output 1 Name"
-      }},
-      {{
-        "conditions": {{
-          "options": {{ "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }},
-          "conditions": [{{ "leftValue": "", "rightValue": "", "operator": {{ "type": "string", "operation": "equals" }} }}],
-          "combinator": "and"
-        }},
-        "renameOutput": true,
-        "outputKey": "Output 2 Name"
-      }},
-      {{
-        "conditions": {{
-          "options": {{ "caseSensitive": true, "leftValue": "", "typeValidation": "strict" }},
-          "conditions": [{{ "leftValue": "", "rightValue": "", "operator": {{ "type": "string", "operation": "equals" }} }}],
-          "combinator": "and"
-        }},
-        "renameOutput": true,
-        "outputKey": "Output 3 Name"
-      }}
-    ]
-  }}
-}}
-</switch_node_pattern>
-
-<connection_type_examples>
-**Main Connections** (regular data flow):
-- Trigger → HTTP Request → Set → Email
-
-**AI Language Model Connections** (ai_languageModel):
-- OpenAI Chat Model → AI Agent
-
-**AI Tool Connections** (ai_tool):
-- Calculator Tool → AI Agent
-- AI Agent Tool → AI Agent (for multi-agent systems)
-
-**AI Document Connections** (ai_document):
-- Document Loader → Vector Store
-
-**AI Embedding Connections** (ai_embedding):
-- OpenAI Embeddings → Vector Store
-
-**AI Text Splitter Connections** (ai_textSplitter):
-- Token Text Splitter → Document Loader
-
-**AI Memory Connections** (ai_memory):
-- Window Buffer Memory → AI Agent
-
-**AI Vector Store in retrieve-as-tool mode** (ai_tool):
-- Vector Store → AI Agent
-</connection_type_examples>
-
-DO NOT:
-- Respond before calling validate_structure
-- Skip validation even if you think structure is correct
-- Add commentary between tool calls - execute tools silently
-- Configure node parameters (that's the Configurator Agent's job)
-- Search for nodes (that's the Discovery Agent's job)
-- Make assumptions about node types - use exactly what Discovery found
-
-RESPONSE FORMAT (only after validation):
-Provide ONE brief text message summarizing:
-- What nodes were added
-- How they're connected
-
-Example: "Created 4 nodes: Trigger → Weather → Image Generation → Email"`;
-
-/**
  * Builder Subgraph State
+ *
+ * State for the Builder subgraph which handles node creation, connections, and configuration.
  */
 export const BuilderSubgraphState = Annotation.Root({
 	// Input: Current workflow to modify
@@ -289,6 +104,12 @@ export const BuilderSubgraphState = Annotation.Root({
 		default: () => null,
 	}),
 
+	// Input: Instance URL for webhook nodes
+	instanceUrl: Annotation<string>({
+		reducer: (x, y) => y ?? x,
+		default: () => '',
+	}),
+
 	// Internal: Conversation
 	messages: Annotation<BaseMessage[]>({
 		reducer: (x, y) => x.concat(y),
@@ -304,12 +125,30 @@ export const BuilderSubgraphState = Annotation.Root({
 		},
 		default: () => [],
 	}),
+
+	// Cached workflow templates (passed from parent, updated by tools)
+	cachedTemplates: Annotation<WorkflowMetadata[]>({
+		reducer: cachedTemplatesReducer,
+		default: () => [],
+	}),
+
+	// Pre-fetched RLC options - raw JSON for potential tool use
+	prefetchedRLCOptions: Annotation<RLCPrefetchResult[]>({
+		reducer: (x, y) => y ?? x,
+		default: () => [],
+	}),
 });
 
 export interface BuilderSubgraphConfig {
 	parsedNodeTypes: INodeTypeDescription[];
 	llm: BaseChatModel;
+	/** Separate LLM for parameter updater chain (defaults to llm if not provided) */
+	llmParameterUpdater?: BaseChatModel;
 	logger?: Logger;
+	instanceUrl?: string;
+	featureFlags?: BuilderFeatureFlags;
+	/** Callback for fetching resource locator options */
+	resourceLocatorCallback?: ResourceLocatorCallback;
 }
 
 export class BuilderSubgraph extends BaseSubgraph<
@@ -318,51 +157,180 @@ export class BuilderSubgraph extends BaseSubgraph<
 	typeof ParentGraphState.State
 > {
 	name = 'builder_subgraph';
-	description = 'Constructs workflow structure: creating nodes and connections';
+	description = 'Constructs workflow structure and configures node parameters';
+
+	private config?: BuilderSubgraphConfig;
+	private agent!: Runnable;
+	private toolMap!: Map<string, StructuredTool>;
+	private instanceUrl: string = '';
+	private nodeTypes: INodeTypeDescription[] = [];
+	private resourceLocatorCallback?: ResourceLocatorCallback;
+	private logger?: Logger;
 
 	create(config: BuilderSubgraphConfig) {
-		// Create tools
-		const tools = [
+		// Store config for use in transformOutput and RLC prefetching
+		this.config = config;
+		this.instanceUrl = config.instanceUrl ?? '';
+		this.nodeTypes = config.parsedNodeTypes;
+		this.resourceLocatorCallback = config.resourceLocatorCallback;
+		this.logger = config.logger;
+
+		// Check if template examples are enabled
+		const includeExamples = config.featureFlags?.templateExamples === true;
+		const enableIntrospection = config.featureFlags?.enableIntrospection === true;
+
+		// Use separate LLM for parameter updater if provided
+		const parameterUpdaterLLM = config.llmParameterUpdater ?? config.llm;
+
+		// Create all tools (structure + configuration)
+		const baseTools: BuilderTool[] = [
+			// Structure tools
 			createAddNodeTool(config.parsedNodeTypes),
 			createConnectNodesTool(config.parsedNodeTypes, config.logger),
 			createRemoveNodeTool(config.logger),
 			createRemoveConnectionTool(config.logger),
+			createRenameNodeTool(config.logger),
 			createValidateStructureTool(config.parsedNodeTypes),
+			// Configuration tools
+			createUpdateNodeParametersTool(
+				config.parsedNodeTypes,
+				parameterUpdaterLLM,
+				config.logger,
+				config.instanceUrl,
+			),
+			createGetNodeParameterTool(),
+			createValidateConfigurationTool(config.parsedNodeTypes),
+			// Execution data tools
+			createGetExecutionSchemaTool(config.logger),
+			createGetExecutionLogsTool(config.logger),
+			createGetExpressionDataMappingTool(config.logger),
+			// Workflow context tools
+			createGetWorkflowOverviewTool(config.logger),
+			createGetNodeContextTool(config.logger),
 		];
-		const toolMap = new Map<string, StructuredTool>(tools.map((bt) => [bt.tool.name, bt.tool]));
+
+		// Conditionally add resource locator tool if callback is provided
+		if (config.resourceLocatorCallback) {
+			baseTools.push(
+				createGetResourceLocatorOptionsTool(
+					config.parsedNodeTypes,
+					config.resourceLocatorCallback,
+					config.logger,
+				),
+			);
+		}
+
+		// Conditionally add introspect tool if feature flag is enabled
+		if (enableIntrospection) {
+			baseTools.push(createIntrospectTool(config.logger));
+		}
+
+		// Conditionally add example tools if feature flag is enabled
+		const tools = includeExamples
+			? [
+					...baseTools,
+					createGetNodeConnectionExamplesTool(config.logger),
+					createGetNodeConfigurationExamplesTool(config.logger),
+				]
+			: baseTools;
+
+		this.toolMap = new Map<string, StructuredTool>(tools.map((bt) => [bt.tool.name, bt.tool]));
+
 		// Create agent with tools bound
-		const systemPrompt = ChatPromptTemplate.fromMessages([
+		const systemPromptTemplate = ChatPromptTemplate.fromMessages([
 			[
 				'system',
 				[
 					{
 						type: 'text',
-						text: BUILDER_PROMPT,
+						text: buildBuilderPrompt({ includeExamples, enableIntrospection }),
+					},
+					{
+						type: 'text',
+						text: INSTANCE_URL_PROMPT,
 						cache_control: { type: 'ephemeral' },
 					},
 				],
 			],
 			['placeholder', '{messages}'],
 		]);
+
 		if (typeof config.llm.bindTools !== 'function') {
 			throw new LLMServiceError('LLM does not support tools', {
 				llmModel: config.llm._llmType(),
 			});
 		}
-		const agent = systemPrompt.pipe(config.llm.bindTools(tools.map((bt) => bt.tool)));
+
+		this.agent = systemPromptTemplate.pipe(config.llm.bindTools(tools.map((bt) => bt.tool)));
+
+		/**
+		 * Prefetch node - pre-fetches RLC options for required empty parameters
+		 * This runs before the agent to provide all necessary resource options upfront
+		 * Mutates messages in place to append RLC context
+		 */
+		const prefetchRLCNode = async (state: typeof BuilderSubgraphState.State) => {
+			// Skip if no callback is available
+			if (!this.resourceLocatorCallback) {
+				return { prefetchedRLCOptions: [] };
+			}
+
+			// Detect RLC parameters that need prefetching
+			const parametersToFetch = detectRLCParametersForPrefetch(
+				state.workflowJSON.nodes,
+				this.nodeTypes,
+			);
+
+			if (parametersToFetch.length === 0) {
+				return { prefetchedRLCOptions: [] };
+			}
+
+			this.logger?.debug('Pre-fetching RLC options', {
+				parameterCount: parametersToFetch.length,
+				parameters: parametersToFetch.map((p) => `${p.nodeName}.${p.parameterPath}`),
+			});
+
+			// Fetch all options in parallel
+			const results = await prefetchRLCOptions(
+				parametersToFetch,
+				state.workflowJSON.nodes,
+				this.resourceLocatorCallback,
+				this.logger,
+			);
+
+			this.logger?.debug('RLC prefetch completed', {
+				successCount: results.filter((r) => !r.error).length,
+				errorCount: results.filter((r) => r.error).length,
+			});
+
+			// Format and append RLC options to the first message (mutates in place)
+			const formattedOptions = formatPrefetchedOptionsForLLM(results);
+			if (formattedOptions && state.messages.length > 0) {
+				const firstMessage = state.messages[0];
+				if (typeof firstMessage.content === 'string') {
+					firstMessage.content = `${firstMessage.content}\n\n${formattedOptions}`;
+				}
+			}
+
+			return { prefetchedRLCOptions: results };
+		};
 
 		/**
 		 * Agent node - calls builder agent
-		 * Context is already in messages from transformInput
+		 * Context is already in messages from transformInput (with RLC options appended by prefetchRLCNode)
 		 */
 		const callAgent = async (state: typeof BuilderSubgraphState.State) => {
 			// Apply cache markers to accumulated messages (for tool loop iterations)
 			applySubgraphCacheMarkers(state.messages);
 
 			// Messages already contain context from transformInput
-			const response = await agent.invoke({
+			const response: unknown = await this.agent.invoke({
 				messages: state.messages,
+				instanceUrl: state.instanceUrl ?? '',
 			});
+
+			if (!isBaseMessage(response)) {
+				throw new LLMServiceError('Builder agent did not return a valid message');
+			}
 
 			return { messages: [response] };
 		};
@@ -374,10 +342,12 @@ export class BuilderSubgraph extends BaseSubgraph<
 
 		// Build the subgraph
 		const subgraph = new StateGraph(BuilderSubgraphState)
+			.addNode('prefetch_rlc', prefetchRLCNode)
 			.addNode('agent', callAgent)
-			.addNode('tools', async (state) => await executeSubgraphTools(state, toolMap))
+			.addNode('tools', async (state) => await executeSubgraphTools(state, this.toolMap))
 			.addNode('process_operations', processOperations)
-			.addEdge('__start__', 'agent')
+			.addEdge('__start__', 'prefetch_rlc')
+			.addEdge('prefetch_rlc', 'agent')
 			// Map 'tools' to tools node, END is handled automatically
 			.addConditionalEdges('agent', shouldContinue)
 			.addEdge('tools', 'process_operations')
@@ -389,20 +359,82 @@ export class BuilderSubgraph extends BaseSubgraph<
 	transformInput(parentState: typeof ParentGraphState.State) {
 		const userRequest = extractUserRequest(parentState.messages);
 
-		// Build context parts for Builder
+		// Build context parts
 		const contextParts: string[] = [];
 
-		// 1. User request (primary)
-		contextParts.push('=== USER REQUEST ===');
-		contextParts.push(userRequest);
+		// When a plan exists it is the single authoritative source of truth.
+		// The plan may differ from the original request (e.g. user edited the
+		// model from gpt-4.1-mini to gpt-5.2-mini). Including conversation
+		// context or the raw user request alongside the plan creates conflicting
+		// signals that cause the builder to follow the stale original request.
+		// The plan is cleared after building (transformOutput), so follow-up
+		// messages still get full conversation context.
+		if (parentState.planOutput) {
+			contextParts.push('=== APPROVED PLAN (FOLLOW THIS) ===');
+			contextParts.push(formatPlanAsText(parentState.planOutput));
+			if (parentState.workflowJSON?.nodes?.length > 0) {
+				const overview = mermaidStringify(
+					{ workflow: parentState.workflowJSON },
+					{ includeNodeType: true, includeNodeParameters: true, includeNodeName: true },
+				);
+				contextParts.push(
+					'=== EXISTING WORKFLOW (do NOT recreate these nodes) ===',
+					overview,
+					'Only make the changes described in the plan.',
+				);
+			}
+		} else {
+			// Conversation context (history, original request, previous actions)
+			// Supports UNDERSTANDING_CONTEXT prompt section for investigating issues
+			const conversationContext = buildConversationContext(
+				parentState.messages,
+				parentState.coordinationLog,
+				parentState.previousSummary,
+			);
+			if (conversationContext) {
+				contextParts.push('=== CONVERSATION CONTEXT ===');
+				contextParts.push(conversationContext);
+			}
 
-		// 2. Discovery context (what nodes to use)
-		if (parentState.discoveryContext) {
-			contextParts.push('=== DISCOVERY CONTEXT ===');
-			contextParts.push(buildDiscoveryContextBlock(parentState.discoveryContext, true));
+			if (userRequest) {
+				contextParts.push('=== USER REQUEST ===');
+				contextParts.push(userRequest);
+			}
 		}
 
-		// 3. Current workflow JSON (to add nodes to)
+		const selectedNodesBlock = buildSelectedNodesContextBlock(parentState.workflowContext);
+		if (selectedNodesBlock) {
+			contextParts.push('=== SELECTED NODES ===');
+			contextParts.push(selectedNodesBlock);
+		}
+
+		// Include best practices only when template examples feature flag is enabled
+		if (parentState.discoveryContext) {
+			const includeBestPractices = this.config?.featureFlags?.templateExamples === true;
+			contextParts.push('=== DISCOVERY CONTEXT ===');
+			contextParts.push(
+				buildDiscoveryContextBlock(parentState.discoveryContext, includeBestPractices),
+			);
+		}
+
+		const builderErrorEntry = parentState.coordinationLog?.find((entry) => {
+			if (entry.status !== 'error') return false;
+			if (entry.phase !== 'builder') return false;
+			return (
+				entry.metadata.phase === 'error' &&
+				'partialBuilderData' in entry.metadata &&
+				entry.metadata.partialBuilderData
+			);
+		});
+
+		if (
+			builderErrorEntry?.metadata.phase === 'error' &&
+			builderErrorEntry.metadata.partialBuilderData
+		) {
+			const { nodeCount, nodeNames } = builderErrorEntry.metadata.partialBuilderData;
+			contextParts.push(buildRecoveryModeContext(nodeCount, nodeNames));
+		}
+
 		contextParts.push('=== CURRENT WORKFLOW ===');
 		if (parentState.workflowJSON.nodes.length > 0) {
 			contextParts.push(buildWorkflowJsonBlock(parentState.workflowJSON));
@@ -410,12 +442,15 @@ export class BuilderSubgraph extends BaseSubgraph<
 			contextParts.push('Empty workflow - ready to build');
 		}
 
-		// 4. Execution schema (data types available, NOT full data)
 		const schemaBlock = buildExecutionSchemaBlock(parentState.workflowContext);
 		if (schemaBlock) {
 			contextParts.push('=== AVAILABLE DATA SCHEMA ===');
 			contextParts.push(schemaBlock);
 		}
+
+		// 7. Full execution context (data + schema for parameter values)
+		contextParts.push('=== EXECUTION CONTEXT ===');
+		contextParts.push(buildExecutionContextBlock(parentState.workflowContext));
 
 		// Create initial message with context
 		const contextMessage = createContextMessage(contextParts);
@@ -425,7 +460,9 @@ export class BuilderSubgraph extends BaseSubgraph<
 			workflowJSON: parentState.workflowJSON,
 			workflowContext: parentState.workflowContext,
 			discoveryContext: parentState.discoveryContext,
+			instanceUrl: this.instanceUrl,
 			messages: [contextMessage], // Context already in messages
+			cachedTemplates: parentState.cachedTemplates,
 		};
 	}
 
@@ -433,32 +470,52 @@ export class BuilderSubgraph extends BaseSubgraph<
 		subgraphOutput: typeof BuilderSubgraphState.State,
 		_parentState: typeof ParentGraphState.State,
 	) {
-		const nodes = subgraphOutput.workflowJSON.nodes;
-		const connections = subgraphOutput.workflowJSON.connections;
-		const connectionCount = Object.values(connections).flat().length;
+		let workflowJSON = subgraphOutput.workflowJSON;
+		let autoFixSummary: string | undefined;
 
-		// Extract builder's actual summary (last message without tool calls)
-		const builderSummary = subgraphOutput.messages
-			.slice()
-			.reverse()
-			.find(
-				(m) =>
-					m.content &&
-					(!('tool_calls' in m) ||
-						!m.tool_calls ||
-						(m.tool_calls && Array.isArray(m.tool_calls) && m.tool_calls.length === 0)),
+		// Auto-fix missing AI connections before returning to parent
+		if (this.config?.parsedNodeTypes) {
+			const violations = validateConnections(workflowJSON, this.config.parsedNodeTypes);
+			const autoFixResult = autoFixConnections(
+				workflowJSON,
+				this.config.parsedNodeTypes,
+				violations,
 			);
 
-		const summaryText =
-			typeof builderSummary?.content === 'string' ? builderSummary.content : undefined;
+			if (autoFixResult.fixed.length > 0) {
+				workflowJSON = {
+					...workflowJSON,
+					connections: autoFixResult.updatedConnections,
+				};
+				autoFixSummary = `Auto-fixed ${autoFixResult.fixed.length} connection(s): ${autoFixResult.fixed
+					.map((fix) => `${fix.sourceNodeName} → ${fix.targetNodeName}`)
+					.join(', ')}`;
+			}
+		}
 
-		// Create coordination log entry (not a message)
+		const nodes = workflowJSON.nodes;
+		const connections = workflowJSON.connections;
+		const connectionCount = Object.values(connections).flat().length;
+
+		// Extract final response (builder summary or setup instructions)
+		const lastMessage = subgraphOutput.messages[subgraphOutput.messages.length - 1];
+		const summaryOrSetupInstructions =
+			typeof lastMessage?.content === 'string'
+				? lastMessage.content
+				: 'Build and configuration complete';
+
+		// Create coordination log entry
+		// Use 'builder' phase for compatibility with existing routing
+		const summary = autoFixSummary
+			? `Created and configured ${nodes.length} nodes with ${connectionCount} connections. ${autoFixSummary}`
+			: `Created and configured ${nodes.length} nodes with ${connectionCount} connections`;
+
 		const logEntry: CoordinationLogEntry = {
 			phase: 'builder',
 			status: 'completed',
 			timestamp: Date.now(),
-			summary: `Created ${nodes.length} nodes with ${connectionCount} connections`,
-			output: summaryText,
+			summary,
+			output: summaryOrSetupInstructions, // Full output for responder
 			metadata: createBuilderMetadata({
 				nodesCreated: nodes.length,
 				connectionsCreated: connectionCount,
@@ -466,10 +523,25 @@ export class BuilderSubgraph extends BaseSubgraph<
 			}),
 		};
 
+		// Extract tool-related messages for persistence (skip the first context message).
+		// This allows the frontend to restore UI state (execute button, tool history)
+		// after page refresh.
+		const toolMessages = extractToolMessagesForPersistence(subgraphOutput.messages);
+
+		// Extract introspection events from subgraph messages
+		const introspectionEvents = extractIntrospectionEventsFromMessages(subgraphOutput.messages);
+
 		return {
-			workflowJSON: subgraphOutput.workflowJSON,
+			workflowJSON,
 			workflowOperations: subgraphOutput.workflowOperations ?? [],
 			coordinationLog: [logEntry],
+			cachedTemplates: subgraphOutput.cachedTemplates,
+			introspectionEvents,
+			planOutput: null,
+			planDecision: null,
+			planFeedback: null,
+			planPrevious: null,
+			messages: toolMessages,
 		};
 	}
 }

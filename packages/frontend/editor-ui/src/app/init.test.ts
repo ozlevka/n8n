@@ -282,6 +282,7 @@ describe('Init', () => {
 
 				cloudPlanStore.userIsTrialing = true;
 				cloudPlanStore.trialExpired = true;
+				cloudPlanStore.shouldShowBanner = true;
 
 				const cloudStoreSpy = vi.spyOn(cloudPlanStore, 'initialize').mockResolvedValueOnce();
 
@@ -291,13 +292,14 @@ describe('Init', () => {
 				expect(bannersStore.pushBannerToStack).toHaveBeenCalledWith('TRIAL_OVER');
 			});
 
-			it('should push TRIAL banner if trial is active', async () => {
+			it('should push TRIAL banner if trial is active and does not have feature flag set', async () => {
 				settingsStore.settings.deployment.type = 'cloud';
 				usersStore.usersById = { '123': { id: '123', email: '' } as IUser };
 				usersStore.currentUserId = '123';
 
 				cloudPlanStore.userIsTrialing = true;
 				cloudPlanStore.trialExpired = false;
+				cloudPlanStore.shouldShowBanner = true;
 
 				const cloudStoreSpy = vi.spyOn(cloudPlanStore, 'initialize').mockResolvedValueOnce();
 

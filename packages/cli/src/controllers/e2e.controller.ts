@@ -5,6 +5,7 @@ import { LICENSE_FEATURES, LICENSE_QUOTAS, UNLIMITED_LICENSE_QUOTA } from '@n8n/
 import {
 	AuthRolesService,
 	GLOBAL_ADMIN_ROLE,
+	GLOBAL_CHAT_USER_ROLE,
 	GLOBAL_MEMBER_ROLE,
 	GLOBAL_OWNER_ROLE,
 	SettingsRepository,
@@ -16,9 +17,7 @@ import { Request } from 'express';
 import { v4 as uuid } from 'uuid';
 
 import { ActiveWorkflowManager } from '@/active-workflow-manager';
-import config from '@/config';
 import { inE2ETests } from '@/constants';
-import { MessageEventBus } from '@/eventbus/message-event-bus/message-event-bus';
 import type { FeatureReturnType } from '@/license';
 import { License } from '@/license';
 import { MfaService } from '@/mfa/mfa.service';
@@ -27,6 +26,7 @@ import { CacheService } from '@/services/cache/cache.service';
 import { FrontendService } from '@/services/frontend.service';
 import { PasswordUtility } from '@/services/password.utility';
 import { ExecutionsConfig } from '@n8n/config';
+import { LogStreamingDestinationService } from '@/modules/log-streaming.ee/log-streaming-destination.service';
 
 if (!inE2ETests) {
 	Container.get(Logger).error('E2E endpoints only allowed during E2E tests');
@@ -73,6 +73,7 @@ type ResetRequest = Request<
 		owner: UserSetupPayload;
 		members: UserSetupPayload[];
 		admin: UserSetupPayload;
+		chat: UserSetupPayload;
 	}
 >;
 
@@ -87,6 +88,7 @@ type PushRequest = Request<
 @RestController('/e2e')
 export class E2EController {
 	private enabledFeatures: Record<BooleanLicenseFeature, boolean> = {
+		[LICENSE_FEATURES.DYNAMIC_CREDENTIALS]: false,
 		[LICENSE_FEATURES.SHARING]: false,
 		[LICENSE_FEATURES.LDAP]: false,
 		[LICENSE_FEATURES.SAML]: false,
@@ -117,8 +119,10 @@ export class E2EController {
 		[LICENSE_FEATURES.OIDC]: false,
 		[LICENSE_FEATURES.MFA_ENFORCEMENT]: false,
 		[LICENSE_FEATURES.WORKFLOW_DIFFS]: false,
+		[LICENSE_FEATURES.NAMED_VERSIONS]: false,
 		[LICENSE_FEATURES.CUSTOM_ROLES]: false,
 		[LICENSE_FEATURES.AI_BUILDER]: false,
+		[LICENSE_FEATURES.PERSONAL_SPACE_POLICY]: false,
 	};
 
 	private static readonly numericFeaturesDefaults: Record<NumericLicenseFeature, number> = {
@@ -164,10 +168,10 @@ export class E2EController {
 		private readonly cacheService: CacheService,
 		private readonly push: Push,
 		private readonly passwordUtility: PasswordUtility,
-		private readonly eventBus: MessageEventBus,
 		private readonly userRepository: UserRepository,
 		private readonly frontendService: FrontendService,
 		private readonly executionsConfig: ExecutionsConfig,
+		private readonly logStreamingDestinationsService: LogStreamingDestinationService,
 	) {
 		license.isLicensed = (feature: BooleanLicenseFeature) => this.enabledFeatures[feature] ?? false;
 
@@ -194,7 +198,7 @@ export class E2EController {
 		await this.truncateAll();
 		await this.reseedRolesAndScopes();
 		await this.resetCache();
-		await this.setupUserManagement(req.body.owner, req.body.members, req.body.admin);
+		await this.setupUserManagement(req.body.owner, req.body.members, req.body.admin, req.body.chat);
 	}
 
 	@Post('/push', { skipAuth: true })
@@ -223,8 +227,7 @@ export class E2EController {
 
 	@Get('/env-feature-flags', { skipAuth: true })
 	async getEnvFeatureFlags() {
-		const currentFlags = this.frontendService.getSettings().envFeatureFlags;
-		return currentFlags;
+		return (await this.frontendService.getSettings()).envFeatureFlags;
 	}
 
 	@Patch('/env-feature-flags', { skipAuth: true })
@@ -254,11 +257,29 @@ export class E2EController {
 		}
 
 		// Return the current environment feature flags
-		const currentFlags = this.frontendService.getSettings().envFeatureFlags;
+		const currentFlags = (await this.frontendService.getSettings()).envFeatureFlags;
 		return {
 			success: true,
 			message: 'Environment feature flags updated',
 			flags: currentFlags,
+		};
+	}
+
+	/**
+	 * Trigger garbage collection for memory profiling in performance tests.
+	 * Requires Node.js to be started with --expose-gc flag.
+	 */
+	@Post('/gc', { skipAuth: true })
+	triggerGarbageCollection() {
+		if (typeof global.gc === 'function') {
+			// Call GC twice to allow for more reclaimation
+			global.gc();
+			global.gc();
+			return { success: true, message: 'Garbage collection triggered' };
+		}
+		return {
+			success: false,
+			message: 'Garbage collection not available. Ensure Node.js is started with --expose-gc flag.',
 		};
 	}
 
@@ -279,9 +300,11 @@ export class E2EController {
 	}
 
 	private async resetLogStreaming() {
-		for (const id in this.eventBus.destinations) {
-			await this.eventBus.removeDestination(id, false);
-			await this.eventBus.deleteDestination(id);
+		const destinations = await this.logStreamingDestinationsService.findDestination();
+		for (const destination of destinations) {
+			if (destination.id) {
+				await this.logStreamingDestinationsService.removeDestination(destination.id, false);
+			}
 		}
 	}
 
@@ -317,6 +340,7 @@ export class E2EController {
 		owner: UserSetupPayload,
 		members: UserSetupPayload[],
 		admin: UserSetupPayload,
+		chat: UserSetupPayload,
 	) {
 		const userCreatePromises = [
 			this.userRepository.createUserWithProject({
@@ -353,6 +377,17 @@ export class E2EController {
 			);
 		}
 
+		userCreatePromises.push(
+			this.userRepository.createUserWithProject({
+				id: uuid(),
+				...chat,
+				password: await this.passwordUtility.hash(chat.password),
+				role: {
+					slug: GLOBAL_CHAT_USER_ROLE.slug,
+				},
+			}),
+		);
+
 		const [newOwner] = await Promise.all(userCreatePromises);
 
 		if (owner?.mfaSecret && owner.mfaRecoveryCodes?.length) {
@@ -364,13 +399,6 @@ export class E2EController {
 				mfaRecoveryCodes: encryptedRecoveryCodes,
 			});
 		}
-
-		await this.settingsRepo.update(
-			{ key: 'userManagement.isInstanceOwnerSetUp' },
-			{ value: 'true' },
-		);
-
-		config.set('userManagement.isInstanceOwnerSetUp', true);
 	}
 
 	private async resetCache() {

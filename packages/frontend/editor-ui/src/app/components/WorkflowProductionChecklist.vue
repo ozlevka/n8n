@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, onMounted, watch } from 'vue';
+import { computed, inject, ref, onMounted, watch } from 'vue';
 import { useI18n } from '@n8n/i18n';
 import { useRouter } from 'vue-router';
 import { useEvaluationStore } from '@/features/ai/evaluation.ee/evaluation.store';
@@ -16,8 +16,8 @@ import {
 	EVALUATIONS_DOCS_URL,
 	ERROR_WORKFLOW_DOCS_URL,
 	TIME_SAVED_DOCS_URL,
-	TIME_SAVED_NODE_EXPERIMENT,
 	TIME_SAVED_NODE_TYPE,
+	ERROR_TRIGGER_NODE_TYPE,
 } from '@/app/constants';
 import { useMessage } from '@/app/composables/useMessage';
 import { useTelemetry } from '@/app/composables/useTelemetry';
@@ -28,7 +28,7 @@ import { useMcp } from '@/features/ai/mcpAccess/composables/useMcp';
 import { N8nSuggestedActions } from '@n8n/design-system';
 import { useSettingsStore } from '@/app/stores/settings.store';
 import { useUsersStore } from '@/features/settings/users/users.store';
-import { usePostHog } from '@/app/stores/posthog.store';
+import { WorkflowDocumentStoreKey } from '@/app/constants/injectionKeys';
 
 const props = defineProps<{
 	workflow: IWorkflowDb;
@@ -46,7 +46,7 @@ const sourceControlStore = useSourceControlStore();
 const settingsStore = useSettingsStore();
 const { isEligibleForMcpAccess } = useMcp();
 const usersStore = useUsersStore();
-const posthogStore = usePostHog();
+const workflowDocumentStore = inject(WorkflowDocumentStoreKey, null);
 
 const isPopoverOpen = ref(false);
 const cachedSettings = ref<WorkflowSettings | null>(null);
@@ -67,11 +67,13 @@ const hasErrorWorkflow = computed(() => {
 	return !!props.workflow.settings?.errorWorkflow;
 });
 
-const hasSavedTimeNodes = computed(() => {
-	if (!posthogStore.isFeatureEnabled(TIME_SAVED_NODE_EXPERIMENT.name)) {
-		return false;
-	}
+const isErrorWorkflow = computed(() => {
+	return props.workflow.nodes.some(
+		(node) => node.type === ERROR_TRIGGER_NODE_TYPE && node.disabled !== true,
+	);
+});
 
+const hasSavedTimeNodes = computed(() => {
 	if (!props.workflow?.nodes) return false;
 	return props.workflow.nodes.some(
 		(node) => node.type === TIME_SAVED_NODE_TYPE && node.disabled !== true,
@@ -101,16 +103,17 @@ const isMcpAccessEnabled = computed(() => {
 	return settingsStore.moduleSettings.mcp?.mcpAccessEnabled ?? false;
 });
 
+const canToggleInstanceMCPAccess = computed(() => isOwner.value || isAdmin.value);
+
 const isWorkflowEligibleForMcpAccess = computed(() => {
 	return isEligibleForMcpAccess(props.workflow);
 });
 
-const canToggleInstanceMCPAccess = computed(() => isOwner.value || isAdmin.value);
-
 const availableActions = computed(() => {
-	if (props.workflow.activeVersionId === null || workflowsCache.isCacheLoading.value) {
+	if (workflowsCache.isCacheLoading.value) {
 		return [];
 	}
+	const hasPublishedVersion = !!workflowDocumentStore?.value?.activeVersionId;
 
 	const actions: Array<{
 		id: ActionType;
@@ -122,7 +125,11 @@ const availableActions = computed(() => {
 	const suggestedActionSettings = cachedSettings.value?.suggestedActions ?? {};
 
 	// Error workflow action
-	if (!suggestedActionSettings.errorWorkflow?.ignored) {
+	if (
+		hasPublishedVersion &&
+		!isErrorWorkflow.value &&
+		!suggestedActionSettings.errorWorkflow?.ignored
+	) {
 		actions.push({
 			id: 'errorWorkflow',
 			title: i18n.baseText('workflowProductionChecklist.errorWorkflow.title'),
@@ -134,6 +141,7 @@ const availableActions = computed(() => {
 
 	// Evaluations action
 	if (
+		hasPublishedVersion &&
 		hasAINode.value &&
 		evaluationStore.isEvaluationEnabled &&
 		!suggestedActionSettings.evaluations?.ignored
@@ -148,7 +156,7 @@ const availableActions = computed(() => {
 	}
 
 	// Time saved action
-	if (!suggestedActionSettings.timeSaved?.ignored) {
+	if (hasPublishedVersion && !suggestedActionSettings.timeSaved?.ignored) {
 		actions.push({
 			id: 'timeSaved',
 			title: i18n.baseText('workflowProductionChecklist.timeSaved.title'),
@@ -305,7 +313,7 @@ function handlePopoverOpenChange(open: boolean) {
 
 // Watch for workflow activation
 watch(
-	() => !!props.workflow.activeVersionId,
+	() => !!workflowDocumentStore?.value?.activeVersionId,
 	async (isActive, wasActive) => {
 		if (isActive && !wasActive) {
 			// Check if this is the first activation

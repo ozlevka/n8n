@@ -4,7 +4,7 @@
  * error workflows, and preserved during workflow resume scenarios.
  */
 
-import { testDb, createWorkflow } from '@n8n/backend-test-utils';
+import { testDb, createWorkflow, createActiveWorkflow } from '@n8n/backend-test-utils';
 import { ExecutionRepository, type IWorkflowDb } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { readFileSync } from 'fs';
@@ -138,7 +138,7 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// SETUP: Create Child Workflow
 			// ============================================================
-			const childWorkflow = await createWorkflow(
+			const childWorkflow = await createActiveWorkflow(
 				{
 					name: 'Child Workflow',
 					...createSubWorkflowFixture(),
@@ -161,8 +161,8 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// EXECUTE: Run Parent Workflow
 			// ============================================================
 			const result = await workflowExecutionService.executeManually(
+				parentWorkflow,
 				{
-					workflowData: parentWorkflow,
 					triggerToStartFrom: { name: 'Trigger' },
 				},
 				owner,
@@ -216,7 +216,7 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// SETUP: Create Grandchild Workflow (Workflow C)
 			// ============================================================
-			const grandchildWorkflow = await createWorkflow(
+			const grandchildWorkflow = await createActiveWorkflow(
 				{
 					name: 'Grandchild Workflow',
 					...createSubWorkflowFixture(),
@@ -227,7 +227,7 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// ============================================================
 			// SETUP: Create Parent Workflow (Workflow B) - calls Grandchild
 			// ============================================================
-			const parentWorkflow = await createWorkflow(
+			const parentWorkflow = await createActiveWorkflow(
 				{
 					name: 'Parent Workflow (B)',
 					...createMiddleWorkflowFixture(grandchildWorkflow.id),
@@ -250,8 +250,8 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// EXECUTE: Run Grandparent Workflow
 			// ============================================================
 			const result = await workflowExecutionService.executeManually(
+				grandparentWorkflow,
 				{
-					workflowData: grandparentWorkflow,
 					triggerToStartFrom: { name: 'Trigger' },
 				},
 				owner,
@@ -342,8 +342,8 @@ describe('Execution Context Propagation Integration Tests', () => {
 			// EXECUTE: Run Both Workflows Independently
 			// ============================================================
 			const result1 = await workflowExecutionService.executeManually(
+				workflow1,
 				{
-					workflowData: workflow1,
 					triggerToStartFrom: { name: 'Trigger' },
 				},
 				owner,
@@ -357,8 +357,8 @@ describe('Execution Context Propagation Integration Tests', () => {
 			await waitForExecution(result1.executionId);
 
 			const result2 = await workflowExecutionService.executeManually(
+				workflow2,
 				{
-					workflowData: workflow2,
 					triggerToStartFrom: { name: 'Trigger' },
 				},
 				owner,
