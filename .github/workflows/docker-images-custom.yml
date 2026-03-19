@@ -42,6 +42,7 @@ jobs:
             N8N_RELEASE_TYPE=production
           platforms: linux/amd64
           provenance: false
+          sbom: false
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
