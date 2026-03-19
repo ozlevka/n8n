@@ -7,8 +7,6 @@ FROM --platform="linux/amd64" ghcr.io/ozlevka/n8n-base:${NODE_VERSION}-${GIT_COM
 # Build the application from source
 WORKDIR /src
 COPY . /src
-# Install pnpm globally
-RUN npm install -g pnpm
 RUN --mount=type=cache,id=pnpm-store,target=/root/.local/share/pnpm/store --mount=type=cache,id=pnpm-metadata,target=/root/.cache/pnpm/metadata DOCKER_BUILD=true pnpm install --frozen-lockfile
 RUN pnpm build
 
