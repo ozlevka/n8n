@@ -21,6 +21,7 @@ RUN apk add --no-cache busybox-binsh && \
         openssl \
         graphicsmagick=1.3.45-r0 `# pinned to avoid ghostscript-fonts (AGPL)` \
         tini \
+        jq \
         tzdata \
         ca-certificates \
         libc6-compat && \
