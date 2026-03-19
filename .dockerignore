@@ -38,3 +38,11 @@
 !packages/@n8n/benchmark/**
 !packages/@n8n/typescript-config
 !packages/@n8n/typescript-config/**
+
+# === n8n-custom image (docker/images/n8n-custom/Dockerfile) - builds from source ===
+!turbo.json
+!packages
+!packages/**
+!.github
+!.github/scripts
+!.github/scripts/trim-fe-packageJson.js
